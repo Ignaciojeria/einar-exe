@@ -1,0 +1,29 @@
+# Air hot-reload / build output
+tmp/
+*.log
+
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+
+# Test / coverage
+*.test
+*.out
+coverage.*
+
+# Dependencias vendored (descomenta si NO usas vendor)
+# vendor/
+
+# Editor / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Variables de entorno
+.env
+.env.local

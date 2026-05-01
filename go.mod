@@ -1,3 +1,3 @@
 module einar-exe
 
-go 1.26.2
+go 1.25rc2
