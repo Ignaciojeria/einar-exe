@@ -1,19 +1,28 @@
 package main
 
 import (
-   "fmt"
-   "net/http"
+    "fmt"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+
+    "github.com/Ignaciojeria/ioc"
 )
 
-func helloHandler(w http.ResponseWriter, r *http.Request) {
-   fmt.Fprintf(w, "Hello, World updated!\n")
-}
-
 func main() {
-   http.HandleFunc("/hello", helloHandler)
-   fmt.Println("Server running at http://localhost:8080")
-   err := http.ListenAndServe(":8080", nil)
-   if err != nil {
-       fmt.Println("Error starting server:", err)
-   }
+    fmt.Println("Starting Einar Exe...")
+
+    if err := ioc.LoadDependencies(); err != nil {
+        log.Fatal(err)
+    }
+    // Wait for termination signal (e.g. Ctrl+C or Kubernetes SIGTERM)
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+    <-quit 
+    
+    // Execute graceful shutdown
+    if err := ioc.Shutdown(); err != nil {
+        log.Fatalf("Shutdown errors: %v", err)
+    }
 }

@@ -1,75 +1,41 @@
 # einar-exe
 
+App en Go con Postgres (+ PostGIS) y Casdoor para auth.
+
 ## Requisitos
 
-- Docker
-- Docker Compose
+- Docker + Docker Compose v2
+- `openssl` (para generar secretos)
 
-## Levantar el proyecto
-
-```bash
-docker compose up
-```
-
-Esto levanta:
-
-| Servicio | Puerto | Detalle |
-|---|---|---|
-| **App (Go)** | 8080 | Hot-reload automático con Air |
-| **PostgreSQL 17 + PostGIS 3.5** | 5432 | Base de datos geoespacial |
-
-La app recompila automáticamente cada vez que guardas cambios en archivos `.go`.
-
-Para correr en background:
+## Setup
 
 ```bash
-docker compose up -d
-docker compose logs -f app   # ver logs en vivo
+./scripts/setup.sh
 ```
 
-## Conexión a PostgreSQL
+El script es idempotente: detecta qué falta (`.env`, usuarios, databases, migraciones) y solo ejecuta lo necesario. Puedes correrlo cuantas veces quieras.
 
-Desde el contenedor de la app, usa la variable de entorno `DATABASE_URL`:
+Servicios:
 
-```
-postgres://postgres:postgres@db:5432/einar?sslmode=disable
-```
-
-Desde tu máquina local o un cliente remoto (DBeaver, pgAdmin, TablePlus, etc.):
-
-| Parámetro | Valor |
+| Servicio | URL |
 |---|---|
-| Host | `localhost` (o la IP del servidor) |
-| Puerto | `5432` |
-| Usuario | `postgres` |
-| Contraseña | `postgres` |
-| Base de datos | `einar` |
+| App | http://localhost:8080 |
+| Casdoor | http://localhost:8000 |
+| Postgres | `localhost:5432` |
 
-Conexión por terminal:
+## Comandos útiles
 
 ```bash
-# Desde el host
-psql -h localhost -U postgres -d einar
-
-# Desde dentro del contenedor
-docker compose exec db psql -U postgres -d einar
+docker compose ps                                      # estado
+docker compose logs -f app                             # logs
+docker compose exec db psql -U einar -d einar          # conectar a la DB
+docker compose --profile tools run --rm migrate        # aplicar migraciones
+docker compose --profile tools run --rm migrate down 1 # rollback
+docker compose restart app                             # reiniciar app
 ```
 
-## Persistencia de datos
-
-La base de datos usa un volume nombrado (`pgdata`). La data se mantiene entre reinicios.
-
-| Comando | ¿Se pierde la data? |
-|---|---|
-| `docker compose down` | ❌ No |
-| `docker compose restart` | ❌ No |
-| `docker compose up --build` | ❌ No |
-| `docker compose down -v` | ⚠️ **Sí** — el flag `-v` elimina los volumes |
-
-## Rebuild
-
-Si modificas el `Dockerfile`:
+## Reset completo
 
 ```bash
-docker compose up --build
+docker compose down -v && ./scripts/setup.sh   # ⚠️ borra el volumen pgdata y rearma todo
 ```

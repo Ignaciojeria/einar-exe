@@ -2,30 +2,113 @@ services:
   app:
     build: .
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:8080"
+    # Hot reload con air + logs a archivo y stdout
+    command: sh -c "air -c .air.toml 2>&1 | tee -a /var/log/app/app.log"
+    tty: true
     volumes:
       - .:/app
+      - ./logs:/var/log/app
     depends_on:
       db:
         condition: service_healthy
+      casdoor:
+        condition: service_healthy
     environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/einar?sslmode=disable
+      # App (process-level)
+      APP_ENV: ${APP_ENV}
+      APP_PORT: ${APP_PORT}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PROJECT_NAME: ${PROJECT_NAME:-einar-exe}
+      VERSION: ${VERSION:-}
+      # Backing service: Postgres
+      DATABASE_URL: ${DATABASE_URL}
+    logging:
+      driver: "local"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Rota ./logs/app.log cada día y conserva 3 copias (≈3 días)
+  logrotate:
+    image: blacklabelops/logrotate
+    container_name: einar-logrotate
+    volumes:
+      - ./logs:/var/log/app
+    environment:
+      LOGS_DIRECTORIES: /var/log/app
+      LOGROTATE_INTERVAL: daily
+      LOGROTATE_COPIES: 3
+      LOGROTATE_COMPRESSION: compress
+      LOGROTATE_SIZE: 50M
+    restart: unless-stopped
 
   db:
     image: postgis/postgis:17-3.5
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: einar
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 3s
       retries: 5
+
+  casdoor:
+    # Imagen sin DB embebida (la all-in-one fuerza MariaDB local e ignora env vars).
+    # Verifica el último tag estable en https://hub.docker.com/r/casbin/casdoor
+    image: casbin/casdoor:v1.811.0
+    container_name: einar-casdoor
+    ports:
+      - "${CASDOOR_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      # Backend storage (Postgres compartido, database lógica `casdoor`)
+      driverName: ${CASDOOR_DRIVER}
+      # Casdoor parsea dbname del propio dataSourceName: concatenamos al final.
+      dataSourceName: "${CASDOOR_DATA_SOURCE}${CASDOOR_DB_NAME}"
+      dbName: ${CASDOOR_DB_NAME}
+      # HTTP
+      httpport: "8000"
+      origin: ${CASDOOR_ORIGIN}
+      origin_frontend: ${CASDOOR_ORIGIN_FRONTEND}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Migraciones SQL (proceso one-off, factor XII).
+  # Corre como `postgres` (superuser) para poder crear extensiones;
+  # las tablas se crean bajo SET ROLE einar para owner correcto.
+  # Uso:
+  #   docker compose --profile tools run --rm migrate              # up (default)
+  #   docker compose --profile tools run --rm migrate down 1
+  #   docker compose --profile tools run --rm migrate version
+  migrate:
+    image: migrate/migrate:v4.17.1
+    profiles: ["tools"]
+    volumes:
+      - ./migrations:/migrations
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${EINAR_DB_NAME}?sslmode=disable
+    command: ["up"]
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:

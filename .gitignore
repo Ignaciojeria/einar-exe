@@ -27,3 +27,7 @@ coverage.*
 # Variables de entorno
 .env
 .env.local
+logs/
+
+# Documentación efimera (planes en evolución, no se versiona)
+docs/

@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ============================================================
+# einar-exe — Setup idempotente
+# ============================================================
+# Ejecutar muchas veces es seguro: cada paso detecta si ya está
+# hecho y lo salta. Útil para:
+#   - Primer arranque desde cero.
+#   - Recuperarse de un setup parcial.
+#   - Re-correr tras un `docker compose down -v`.
+# ============================================================
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Colores opcionales
+if [[ -t 1 ]]; then
+    BOLD=$'\e[1m'; DIM=$'\e[2m'; OK=$'\e[32m'; WARN=$'\e[33m'; RST=$'\e[0m'
+else
+    BOLD=""; DIM=""; OK=""; WARN=""; RST=""
+fi
+step() { echo "${BOLD}→ $*${RST}"; }
+done_() { echo "  ${OK}✓${RST} $*"; }
+skip() { echo "  ${DIM}↷ $* (ya hecho)${RST}"; }
+
+# ------------------------------------------------------------
+# 1. .env
+# ------------------------------------------------------------
+step "Verificando .env"
+if [[ ! -f .env ]]; then
+    if [[ ! -f .env.example ]]; then
+        echo "ERROR: falta .env.example" >&2; exit 1
+    fi
+    cp .env.example .env
+
+    gen_pw()     { openssl rand -base64 24 | tr -d '/+=' | cut -c1-24; }
+    gen_secret() { openssl rand -hex 32; }
+    gen_id()     { openssl rand -hex 10; }
+
+    PW_ROOT=$(gen_pw); PW_EINAR=$(gen_pw); PW_CASDOOR=$(gen_pw); PW_ADMIN=$(gen_pw)
+    CLIENT_ID=$(gen_id); CLIENT_SECRET=$(gen_secret)
+
+    # sed -i portable (BSD/GNU)
+    sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+    sedi -e "s|CHANGE_ME_ROOT|${PW_ROOT}|g" \
+         -e "s|CHANGE_ME_EINAR|${PW_EINAR}|g" \
+         -e "s|CHANGE_ME_CASDOOR|${PW_CASDOOR}|g" \
+         -e "s|CHANGE_ME_ADMIN|${PW_ADMIN}|g" \
+         -e "s|CHANGE_ME_CLIENT_ID|${CLIENT_ID}|g" \
+         -e "s|CHANGE_ME_CLIENT_SECRET|${CLIENT_SECRET}|g" \
+         .env
+    done_ ".env creado con secretos generados"
+else
+    skip ".env existe"
+fi
+
+# Leer solo las variables que el script necesita.
+# Evitamos `. ./.env` porque valores con espacios sin comillar
+# se rompen en bash (cada token se trata como una asignación).
+env_get() {
+    local key="$1"
+    local val
+    val=$(grep -E "^${key}=" .env | tail -1 | cut -d= -f2-)
+    # Quitar comillas envolventes si las hay
+    val="${val%\"}"; val="${val#\"}"
+    val="${val%\'}"; val="${val#\'}"
+    printf '%s' "$val"
+}
+POSTGRES_PASSWORD=$(env_get POSTGRES_PASSWORD)
+EINAR_DB_USER=$(env_get EINAR_DB_USER)
+EINAR_DB_PASSWORD=$(env_get EINAR_DB_PASSWORD)
+EINAR_DB_NAME=$(env_get EINAR_DB_NAME)
+CASDOOR_DB_USER=$(env_get CASDOOR_DB_USER)
+CASDOOR_DB_PASSWORD=$(env_get CASDOOR_DB_PASSWORD)
+CASDOOR_DB_NAME=$(env_get CASDOOR_DB_NAME)
+APP_PORT=$(env_get APP_PORT)
+CASDOOR_PORT=$(env_get CASDOOR_PORT)
+
+# ------------------------------------------------------------
+# 2. Postgres up
+# ------------------------------------------------------------
+step "Levantando Postgres"
+docker compose up -d db >/dev/null
+printf "  esperando healthy"
+# Tras `down -v`, Postgres pasa por una fase de initdb donde acepta
+# conexiones brevemente y luego se reinicia. Exigimos N respuestas
+# OK consecutivas para asegurar que el cluster ya está estable.
+stable_count=0
+while (( stable_count < 3 )); do
+    if docker compose exec -T db pg_isready -U postgres -q 2>/dev/null; then
+        stable_count=$(( stable_count + 1 ))
+    else
+        stable_count=0
+    fi
+    printf "."; sleep 1
+done
+echo
+done_ "Postgres healthy"
+
+# ------------------------------------------------------------
+# 3. Detectar password actual del superuser
+# ------------------------------------------------------------
+# Tras el primer bootstrap el password root ya fue rotado al del .env.
+# Antes, sigue siendo el default "postgres".
+step "Autenticando contra Postgres"
+PG_PW=""
+for candidate in "$POSTGRES_PASSWORD" "postgres"; do
+    if docker compose exec -T -e PGPASSWORD="$candidate" db \
+        psql -U postgres -c '\q' >/dev/null 2>&1; then
+        PG_PW="$candidate"; break
+    fi
+done
+if [[ -z "$PG_PW" ]]; then
+    echo "ERROR: no puedo autenticarme con ningún password conocido." >&2
+    echo "Si rotaste el password manualmente, alinéalo en el .env o resetea:" >&2
+    echo "  docker compose down -v && ./scripts/setup.sh" >&2
+    exit 1
+fi
+done_ "autenticado"
+
+psql_root() {
+    docker compose exec -T -e PGPASSWORD="$PG_PW" db \
+        psql -U postgres -v ON_ERROR_STOP=1 "$@"
+}
+
+# ------------------------------------------------------------
+# 4. Bootstrap idempotente: usuarios + databases
+# ------------------------------------------------------------
+step "Bootstrap de usuarios y databases"
+
+# Postgres no tiene CREATE USER IF NOT EXISTS; usamos pg_roles + DO block.
+# ALTER ... WITH PASSWORD se ejecuta siempre para mantener el .env como
+# fuente de verdad (rota el password si cambia).
+psql_root <<EOF >/dev/null
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${EINAR_DB_USER}') THEN
+        CREATE ROLE "${EINAR_DB_USER}" LOGIN PASSWORD '${EINAR_DB_PASSWORD}';
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${CASDOOR_DB_USER}') THEN
+        CREATE ROLE "${CASDOOR_DB_USER}" LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
+    END IF;
+END\$\$;
+
+ALTER ROLE "${EINAR_DB_USER}"   WITH LOGIN PASSWORD '${EINAR_DB_PASSWORD}';
+ALTER ROLE "${CASDOOR_DB_USER}" WITH LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
+EOF
+done_ "usuarios einar y casdoor"
+
+# CREATE DATABASE no soporta IF NOT EXISTS: usamos \gexec condicional.
+psql_root <<EOF >/dev/null
+SELECT 'CREATE DATABASE "${CASDOOR_DB_NAME}" OWNER "${CASDOOR_DB_USER}"'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${CASDOOR_DB_NAME}')\gexec
+EOF
+done_ "database ${CASDOOR_DB_NAME}"
+
+# Asegurar ownership de la DB einar (idempotente).
+psql_root -c "ALTER DATABASE \"${EINAR_DB_NAME}\" OWNER TO \"${EINAR_DB_USER}\";" >/dev/null
+done_ "database ${EINAR_DB_NAME} owned by ${EINAR_DB_USER}"
+
+# Rotar password del superuser al del .env (siempre, idempotente).
+psql_root -c "ALTER USER postgres WITH PASSWORD '${POSTGRES_PASSWORD}';" >/dev/null
+done_ "password de postgres alineado con .env"
+
+# ------------------------------------------------------------
+# 5. Migraciones (golang-migrate es idempotente por diseño)
+# ------------------------------------------------------------
+step "Aplicando migraciones"
+docker compose --profile tools run --rm migrate 2>&1 | grep -v "^ \(Container\|Pulled\|Pull\|Status\)" || true
+done_ "schema actualizado"
+
+# ------------------------------------------------------------
+# 6. Levantar el resto del stack
+# ------------------------------------------------------------
+step "Levantando el resto del stack"
+docker compose up -d >/dev/null
+done_ "stack arriba"
+
+echo
+echo "${OK}${BOLD}✓ Setup completo${RST}"
+echo "  App      → http://localhost:${APP_PORT:-8080}"
+echo "  Casdoor  → http://localhost:${CASDOOR_PORT:-8000}"
+echo "  Postgres → localhost:5432  (user: ${EINAR_DB_USER})"

@@ -1,0 +1,69 @@
+package environment
+
+import (
+	"github.com/Ignaciojeria/ioc"
+)
+
+var _ = ioc.Register(NewConf)
+
+// Conf agrupa la configuración del proceso `app` de einar-exe.
+//
+// Reglas (twelve-factor III — Config):
+//   - Solo variables que consume el binario Go.
+//   - Las credenciales del contenedor `db` (POSTGRES_*) o del servidor
+//     `casdoor` (CASDOOR_DRIVER, CASDOOR_ADMIN_*, etc.) NO viven aquí:
+//     son configuración interna de esos servicios y la app no debe verlas.
+//   - Las variables marcadas como `required:"true"` hacen que la app falle
+//     rápido al arranque si no están definidas.
+type Conf struct {
+	// ------------------------------------------------------------
+	// App
+	// ------------------------------------------------------------
+	APP_ENV        string `env:"APP_ENV"        envDefault:"development"` // development | staging | production
+	APP_PORT       string `env:"APP_PORT"       envDefault:"8080"`
+	APP_PUBLIC_URL string `env:"APP_PUBLIC_URL" envDefault:"http://localhost:8080"`
+	LOG_LEVEL      string `env:"LOG_LEVEL"      envDefault:"info"` // debug | info | warn | error
+	PROJECT_NAME   string `env:"PROJECT_NAME"   envDefault:"einar-exe"`
+	VERSION        string `env:"VERSION"`
+
+	// ------------------------------------------------------------
+	// Backing service: Postgres
+	// ------------------------------------------------------------
+	// Cadena de conexión completa (twelve-factor IV — recurso enchufable).
+	// Cambiar de Postgres local a uno gestionado debe ser solo cambiar esta URL.
+	DATABASE_URL string `env:"DATABASE_URL,required"`
+
+	// ------------------------------------------------------------
+	// Backing service: Casdoor (IAM)
+	// ------------------------------------------------------------
+	// Endpoint interno (server-to-server) usado para intercambio de tokens,
+	// llamadas a la API y descarga de JWKS. Resuelve dentro de la red Docker.
+	CASDOOR_ENDPOINT_INTERNAL string `env:"CASDOOR_ENDPOINT_INTERNAL,required"`
+
+	// Origin público de Casdoor: la URL a la que se redirige el navegador
+	// del usuario en el flujo OAuth (login screen).
+	CASDOOR_ORIGIN string `env:"CASDOOR_ORIGIN" envDefault:"http://localhost:8000"`
+
+	// Identificadores lógicos en Casdoor.
+	CASDOOR_ORG_NAME string `env:"CASDOOR_ORG_NAME" envDefault:"einar"`
+	CASDOOR_APP_NAME string `env:"CASDOOR_APP_NAME" envDefault:"einar-app"`
+
+	// Clave pública (PEM) para verificar JWTs emitidos por Casdoor.
+	// Opcional: si está vacía, la app debe descargar las llaves vía JWKS
+	// desde CASDOOR_ENDPOINT_INTERNAL.
+	CASDOOR_JWT_PUBLIC_KEY string `env:"CASDOOR_JWT_PUBLIC_KEY"`
+
+	// ------------------------------------------------------------
+	// OAuth2
+	// ------------------------------------------------------------
+	// Estrategia MVP: JWT puro de Casdoor en cookie HttpOnly. La app no
+	// firma sesiones propias, por eso NO existe APP_SESSION_SECRET aquí.
+	// Ver docs/casdoor-integration-plan.md §12 (decisión registrada).
+	CASDOOR_CLIENT_ID      string `env:"CASDOOR_CLIENT_ID,required"`
+	CASDOOR_CLIENT_SECRET  string `env:"CASDOOR_CLIENT_SECRET,required"`
+	APP_OAUTH_REDIRECT_URI string `env:"APP_OAUTH_REDIRECT_URI,required"`
+}
+
+func NewConf() (Conf, error) {
+	return Parse[Conf]()
+}
