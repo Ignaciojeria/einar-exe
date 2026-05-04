@@ -72,6 +72,8 @@ EINAR_DB_NAME=$(env_get EINAR_DB_NAME)
 CASDOOR_DB_USER=$(env_get CASDOOR_DB_USER)
 CASDOOR_DB_PASSWORD=$(env_get CASDOOR_DB_PASSWORD)
 CASDOOR_DB_NAME=$(env_get CASDOOR_DB_NAME)
+CASDOOR_ADMIN_USERNAME=$(env_get CASDOOR_ADMIN_USERNAME)
+CASDOOR_ADMIN_PASSWORD=$(env_get CASDOOR_ADMIN_PASSWORD)
 APP_PORT=$(env_get APP_PORT)
 CASDOOR_PORT=$(env_get CASDOOR_PORT)
 
@@ -174,6 +176,40 @@ done_ "schema actualizado"
 step "Levantando el resto del stack"
 docker compose up -d >/dev/null
 done_ "stack arriba"
+
+# ------------------------------------------------------------
+# 7. Alinear admin de Casdoor con el .env
+# ------------------------------------------------------------
+# Casdoor seedea su admin la primera vez con `built-in/admin/123`.
+# Sobreescribimos la password con la del .env para que el .env sea
+# fuente de verdad. UPDATE es idempotente: si ya coincide, no-op.
+if [[ -n "${CASDOOR_ADMIN_USERNAME:-}" && -n "${CASDOOR_ADMIN_PASSWORD:-}" ]]; then
+    step "Alineando admin de Casdoor con .env"
+    printf "  esperando casdoor healthy"
+    casdoor_ready=false
+    for _ in $(seq 1 60); do
+        status=$(docker inspect -f '{{.State.Health.Status}}' einar-casdoor 2>/dev/null || echo "")
+        if [[ "$status" == "healthy" ]]; then
+            casdoor_ready=true; break
+        fi
+        printf "."; sleep 1
+    done
+    echo
+    if $casdoor_ready; then
+        # password_type=plain en la imagen por defecto, basta con UPDATE.
+        docker compose exec -T -e PGPASSWORD="$CASDOOR_DB_PASSWORD" db \
+            psql -U "$CASDOOR_DB_USER" -d "$CASDOOR_DB_NAME" -v ON_ERROR_STOP=1 -q <<EOF >/dev/null
+UPDATE "user"
+SET    password = '${CASDOOR_ADMIN_PASSWORD}',
+       password_type = 'plain'
+WHERE  owner = 'built-in' AND name = '${CASDOOR_ADMIN_USERNAME}';
+EOF
+        done_ "admin '${CASDOOR_ADMIN_USERNAME}' alineado con .env"
+    else
+        echo "  ${WARN}⚠${RST} casdoor no quedó healthy a tiempo; salté la rotación del admin."
+        echo "     Rerun ./scripts/setup.sh más tarde para reintentar."
+    fi
+fi
 
 echo
 echo "${OK}${BOLD}✓ Setup completo${RST}"
