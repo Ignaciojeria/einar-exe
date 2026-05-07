@@ -64,9 +64,9 @@ if [[ ! -f .env ]]; then
          -e "s|CHANGE_ME_CLIENT_ID|${CLIENT_ID}|g" \
          -e "s|CHANGE_ME_CLIENT_SECRET|${CLIENT_SECRET}|g" \
          -e "s|CHANGE_ME_ZO|${PW_ZO}|g" \
-         -e "s|CHANGE_ME_REDASH|$(gen_pw)|g" \
-         -e "s|CHANGE_ME_REDASH_SECRET|$(gen_secret)|g" \
-         -e "s|CHANGE_ME_REDASH_COOKIE|$(gen_secret)|g" \
+         -e "s|CHANGE_ME_RDPW|$(gen_pw)|g" \
+         -e "s|CHANGE_ME_RDSK|$(gen_secret)|g" \
+         -e "s|CHANGE_ME_RDCK|$(gen_secret)|g" \
          .env
     done_ ".env creado con secretos generados"
 else
