@@ -9,6 +9,7 @@ services:
     volumes:
       - .:/app
       - ./logs:/var/log/app
+      - ./secrets/casdoor-jwt.pem:/run/secrets/casdoor-jwt.pem:ro
     depends_on:
       db:
         condition: service_healthy
@@ -24,6 +25,7 @@ services:
       VERSION: ${VERSION:-}
       # Backing service: Postgres
       DATABASE_URL: ${DATABASE_URL}
+      CASDOOR_JWT_PUBLIC_KEY_FILE: /run/secrets/casdoor-jwt.pem
     logging:
       driver: "local"
       options:
@@ -110,5 +112,17 @@ services:
       db:
         condition: service_healthy
 
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    ports:
+      - "${ZO_PORT:-5080}:5080"
+    environment:
+      ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL}
+      ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD}
+    volumes:
+      - o2data:/data
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  o2data:

@@ -31,3 +31,6 @@ logs/
 
 # Documentación efimera (planes en evolución, no se versiona)
 docs/
+
+# Secretos montados (PEM, certs, etc.)
+secrets/

@@ -25,6 +25,21 @@ skip() { echo "  ${DIM}↷ $* (ya hecho)${RST}"; }
 # ------------------------------------------------------------
 # 1. .env
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 0. secrets/
+# ------------------------------------------------------------
+step "Verificando secrets/"
+mkdir -p secrets
+if [[ ! -f secrets/casdoor-jwt.pem ]]; then
+    touch secrets/casdoor-jwt.pem
+    done_ "secrets/casdoor-jwt.pem creado (vacío — reemplazar con la PEM real de Casdoor)"
+else
+    skip "secrets/casdoor-jwt.pem existe"
+fi
+
+# ------------------------------------------------------------
+# 1. .env
+# ------------------------------------------------------------
 step "Verificando .env"
 if [[ ! -f .env ]]; then
     if [[ ! -f .env.example ]]; then
@@ -37,6 +52,7 @@ if [[ ! -f .env ]]; then
     gen_id()     { openssl rand -hex 10; }
 
     PW_ROOT=$(gen_pw); PW_EINAR=$(gen_pw); PW_CASDOOR=$(gen_pw); PW_ADMIN=$(gen_pw)
+    PW_ZO=$(gen_pw)
     CLIENT_ID=$(gen_id); CLIENT_SECRET=$(gen_secret)
 
     # sed -i portable (BSD/GNU)
@@ -47,6 +63,7 @@ if [[ ! -f .env ]]; then
          -e "s|CHANGE_ME_ADMIN|${PW_ADMIN}|g" \
          -e "s|CHANGE_ME_CLIENT_ID|${CLIENT_ID}|g" \
          -e "s|CHANGE_ME_CLIENT_SECRET|${CLIENT_SECRET}|g" \
+         -e "s|CHANGE_ME_ZO|${PW_ZO}|g" \
          .env
     done_ ".env creado con secretos generados"
 else
