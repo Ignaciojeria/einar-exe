@@ -64,6 +64,9 @@ if [[ ! -f .env ]]; then
          -e "s|CHANGE_ME_CLIENT_ID|${CLIENT_ID}|g" \
          -e "s|CHANGE_ME_CLIENT_SECRET|${CLIENT_SECRET}|g" \
          -e "s|CHANGE_ME_ZO|${PW_ZO}|g" \
+         -e "s|CHANGE_ME_REDASH|$(gen_pw)|g" \
+         -e "s|CHANGE_ME_REDASH_SECRET|$(gen_secret)|g" \
+         -e "s|CHANGE_ME_REDASH_COOKIE|$(gen_secret)|g" \
          .env
     done_ ".env creado con secretos generados"
 else
@@ -91,8 +94,12 @@ CASDOOR_DB_PASSWORD=$(env_get CASDOOR_DB_PASSWORD)
 CASDOOR_DB_NAME=$(env_get CASDOOR_DB_NAME)
 CASDOOR_ADMIN_USERNAME=$(env_get CASDOOR_ADMIN_USERNAME)
 CASDOOR_ADMIN_PASSWORD=$(env_get CASDOOR_ADMIN_PASSWORD)
+REDASH_DB_USER=$(env_get REDASH_DB_USER)
+REDASH_DB_PASSWORD=$(env_get REDASH_DB_PASSWORD)
+REDASH_DB_NAME=$(env_get REDASH_DB_NAME)
 APP_PORT=$(env_get APP_PORT)
 CASDOOR_PORT=$(env_get CASDOOR_PORT)
+REDASH_PORT=$(env_get REDASH_PORT)
 
 # ------------------------------------------------------------
 # 2. Postgres up
@@ -158,12 +165,16 @@ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${CASDOOR_DB_USER}') THEN
         CREATE ROLE "${CASDOOR_DB_USER}" LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
     END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${REDASH_DB_USER}') THEN
+        CREATE ROLE "${REDASH_DB_USER}" LOGIN PASSWORD '${REDASH_DB_PASSWORD}';
+    END IF;
 END\$\$;
 
 ALTER ROLE "${EINAR_DB_USER}"   WITH LOGIN PASSWORD '${EINAR_DB_PASSWORD}';
 ALTER ROLE "${CASDOOR_DB_USER}" WITH LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
+ALTER ROLE "${REDASH_DB_USER}"  WITH LOGIN PASSWORD '${REDASH_DB_PASSWORD}';
 EOF
-done_ "usuarios einar y casdoor"
+done_ "usuarios einar, casdoor y redash"
 
 # CREATE DATABASE no soporta IF NOT EXISTS: usamos \gexec condicional.
 psql_root <<EOF >/dev/null
@@ -171,6 +182,12 @@ SELECT 'CREATE DATABASE "${CASDOOR_DB_NAME}" OWNER "${CASDOOR_DB_USER}"'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${CASDOOR_DB_NAME}')\gexec
 EOF
 done_ "database ${CASDOOR_DB_NAME}"
+
+psql_root <<EOF >/dev/null
+SELECT 'CREATE DATABASE "${REDASH_DB_NAME}" OWNER "${REDASH_DB_USER}"'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${REDASH_DB_NAME}')\gexec
+EOF
+done_ "database ${REDASH_DB_NAME}"
 
 # Asegurar ownership de la DB einar (idempotente).
 psql_root -c "ALTER DATABASE \"${EINAR_DB_NAME}\" OWNER TO \"${EINAR_DB_USER}\";" >/dev/null
@@ -188,14 +205,21 @@ docker compose --profile tools run --rm migrate 2>&1 | grep -v "^ \(Container\|P
 done_ "schema actualizado"
 
 # ------------------------------------------------------------
-# 6. Levantar el resto del stack
+# 6. Redash schema (create_db es idempotente)
+# ------------------------------------------------------------
+step "Inicializando schema de Redash"
+docker compose --profile tools run --rm redash-init 2>&1 | grep -v "^ \(Container\|Pulled\|Pull\|Status\)" || true
+done_ "schema de Redash listo"
+
+# ------------------------------------------------------------
+# 7. Levantar el resto del stack
 # ------------------------------------------------------------
 step "Levantando el resto del stack"
 docker compose up -d >/dev/null
 done_ "stack arriba"
 
 # ------------------------------------------------------------
-# 7. Alinear admin de Casdoor con el .env
+# 8. Alinear admin de Casdoor con el .env
 # ------------------------------------------------------------
 # Casdoor seedea su admin la primera vez con `built-in/admin/123`.
 # Sobreescribimos la password con la del .env para que el .env sea
@@ -232,4 +256,5 @@ echo
 echo "${OK}${BOLD}✓ Setup completo${RST}"
 echo "  App      → http://localhost:${APP_PORT:-8080}"
 echo "  Casdoor  → http://localhost:${CASDOOR_PORT:-8000}"
+echo "  Redash   → http://localhost:${REDASH_PORT:-5000}"
 echo "  Postgres → localhost:5432  (user: ${EINAR_DB_USER})"

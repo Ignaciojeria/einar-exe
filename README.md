@@ -22,6 +22,7 @@ Servicios:
 | App | http://localhost:8080 |
 | Casdoor | http://localhost:8000 |
 | OpenObserve | http://localhost:5080 |
+| Redash | http://localhost:5000 |
 | Postgres | `localhost:5432` |
 
 ## Comandos útiles

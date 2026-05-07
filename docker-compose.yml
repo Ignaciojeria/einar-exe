@@ -112,6 +112,80 @@ services:
       db:
         condition: service_healthy
 
+  # ── Redash (dashboards & queries) ──────────────────────────
+  redash-redis:
+    image: redis:7-alpine
+    volumes:
+      - redash-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  redash-server:
+    image: redash/redash:25.8.0
+    ports:
+      - "${REDASH_PORT:-5000}:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redash-redis:
+        condition: service_healthy
+    environment:
+      REDASH_DATABASE_URL: postgres://${REDASH_DB_USER}:${REDASH_DB_PASSWORD}@db:5432/${REDASH_DB_NAME}
+      REDASH_REDIS_URL: redis://redash-redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+      PYTHONUNBUFFERED: "0"
+    command: server
+    restart: unless-stopped
+
+  redash-worker:
+    image: redash/redash:25.8.0
+    depends_on:
+      redash-server:
+        condition: service_started
+    environment:
+      REDASH_DATABASE_URL: postgres://${REDASH_DB_USER}:${REDASH_DB_PASSWORD}@db:5432/${REDASH_DB_NAME}
+      REDASH_REDIS_URL: redis://redash-redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+      QUEUES: "queries,scheduled_queries,celery"
+      WORKERS_COUNT: "2"
+    command: worker
+    restart: unless-stopped
+
+  redash-scheduler:
+    image: redash/redash:25.8.0
+    depends_on:
+      redash-server:
+        condition: service_started
+    environment:
+      REDASH_DATABASE_URL: postgres://${REDASH_DB_USER}:${REDASH_DB_PASSWORD}@db:5432/${REDASH_DB_NAME}
+      REDASH_REDIS_URL: redis://redash-redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+    command: scheduler
+    restart: unless-stopped
+
+  # One-off: crea tablas de Redash en Postgres (idempotente)
+  redash-init:
+    image: redash/redash:25.8.0
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redash-redis:
+        condition: service_healthy
+    environment:
+      REDASH_DATABASE_URL: postgres://${REDASH_DB_USER}:${REDASH_DB_PASSWORD}@db:5432/${REDASH_DB_NAME}
+      REDASH_REDIS_URL: redis://redash-redis:6379/0
+      REDASH_SECRET_KEY: ${REDASH_SECRET_KEY}
+      REDASH_COOKIE_SECRET: ${REDASH_COOKIE_SECRET}
+    command: create_db
+
   openobserve:
     image: public.ecr.aws/zinclabs/openobserve:latest
     ports:
@@ -126,3 +200,4 @@ services:
 volumes:
   pgdata:
   o2data:
+  redash-redis:
