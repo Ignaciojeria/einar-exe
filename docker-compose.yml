@@ -1,15 +1,38 @@
 services:
+  # Reverse proxy = única puerta pública del stack.
+  # exe.dev hace TLS termination ANTES de Caddy; aquí corre HTTP plano.
+  # Por qué existe: exe.dev solo permite UN puerto público por VM, y
+  # nuestro SaaS expone 4 servicios (app, casdoor, redash, openobserve)
+  # que deben ser accesibles anónimamente. Caddy hace path-routing
+  # interno para repartir ese único puerto.
+  caddy:
+    image: caddy:2-alpine
+    container_name: einar-caddy
+    ports:
+      # exe.dev solo permite puertos 3000-9999 como públicos.
+      # Aprovechamos que el VM ya está set-public en :8000 (default que
+      # tenía Casdoor). Ahora Caddy responde ahí y enruta internamente.
+      - "8000:80"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+      - casdoor
+    restart: unless-stopped
+
   app:
     build: .
     ports:
       - "${APP_PORT:-8080}:8080"
-    # Hot reload con air + logs a archivo y stdout
-    command: sh -c "air -c .air.toml 2>&1 | tee -a /var/log/app/app.log"
+    # Hot reload con air. Logs solo a stdout (12-factor XI):
+    # docker los captura via `logging.driver: local` con rotación.
+    # Tu orquestador / agregador de logs los recoge desde ahí.
+    command: air -c .air.toml
     tty: true
     volumes:
       - .:/app
-      - ./logs:/var/log/app
-      - ./secrets/casdoor-jwt.pem:/run/secrets/casdoor-jwt.pem:ro
     depends_on:
       db:
         condition: service_healthy
@@ -25,26 +48,11 @@ services:
       VERSION: ${VERSION:-}
       # Backing service: Postgres
       DATABASE_URL: ${DATABASE_URL}
-      CASDOOR_JWT_PUBLIC_KEY_FILE: /run/secrets/casdoor-jwt.pem
     logging:
       driver: "local"
       options:
         max-size: "10m"
         max-file: "3"
-
-  # Rota ./logs/app.log cada día y conserva 3 copias (≈3 días)
-  logrotate:
-    image: blacklabelops/logrotate
-    container_name: einar-logrotate
-    volumes:
-      - ./logs:/var/log/app
-    environment:
-      LOGS_DIRECTORIES: /var/log/app
-      LOGROTATE_INTERVAL: daily
-      LOGROTATE_COPIES: 3
-      LOGROTATE_COMPRESSION: compress
-      LOGROTATE_SIZE: 50M
-    restart: unless-stopped
 
   db:
     image: postgis/postgis:17-3.5
@@ -67,11 +75,19 @@ services:
     # Verifica el último tag estable en https://hub.docker.com/r/casbin/casdoor
     image: casbin/casdoor:v1.811.0
     container_name: einar-casdoor
-    ports:
-      - "${CASDOOR_PORT:-8000}:8000"
+    # Sin port mapping al host: Casdoor solo es accesible vía Caddy o
+    # via docker DNS desde otros contenedores (http://casdoor:8000).
+    # Si necesitas debugear su UI directamente, usa Caddy:
+    # https://einar.exe.xyz/login (Caddy lo pasa a casdoor:8000).
     depends_on:
       db:
         condition: service_healthy
+    # init_data.json se renderiza en el host por scripts/setup.sh
+    # (envsubst-like sobre casdoor/init_data.json.tpl) y se monta
+    # read-only. Casdoor lo lee desde su WORKDIR (/) al arrancar y
+    # crea cualquier objeto declarado que aún no exista en la DB.
+    volumes:
+      - ./casdoor/init_data.json:/init_data.json:ro
     environment:
       RUNNING_IN_DOCKER: "true"
       # Backend storage (Postgres compartido, database lógica `casdoor`)
@@ -201,3 +217,5 @@ volumes:
   pgdata:
   o2data:
   redash-redis:
+  caddy_data:
+  caddy_config:

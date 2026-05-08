@@ -1,0 +1,58 @@
+# Caddy = único ingress público del stack.
+#
+# exe.dev hace TLS termination en https://einar.exe.xyz/ y forwardea a este
+# Caddy en HTTP plano dentro de la VM. Caddy reparte por path a los 4
+# servicios internos.
+#
+# Modelo de ruteo:
+#   - APP captura un set acotado de rutas conocidas (allowlist).
+#   - CASDOOR captura todo lo demás por defecto (UI, OAuth, /.well-known, ...).
+#   - REDASH y OPENOBSERVE bajo subpath con strip-prefix.
+#
+# Cuando agregues un endpoint nuevo a la app, agrégalo aquí también.
+
+:80 {
+    log {
+        output stdout
+        format console
+    }
+
+    # ── REDASH bajo /redash/* ─────────────────────────────────────────
+    # Strip-prefix: REDASH_BASE_URL en sus env vars debe apuntar a
+    # /redash para que sus links absolutos sean correctos.
+    handle_path /redash/* {
+        reverse_proxy redash-server:5000
+    }
+
+    # ── OPENOBSERVE bajo /o2/* ────────────────────────────────────────
+    # Igual: ZO_BASE_URI=/o2/ debe configurarse en su env.
+    handle_path /o2/* {
+        reverse_proxy openobserve:5080
+    }
+
+    # ── APP Go: rutas conocidas ───────────────────────────────────────
+    @app {
+        path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh
+        path /api/me
+        path /api/session
+        path /api/embedded-apps*
+        path /api/tenants*
+        path /signup
+        path /signup/*
+        path /t/*              # /t/{tenant-slug}/...
+        path /hello            # smoke test
+        path /sdk/*            # SDK servido para embedded apps (Fase 4)
+    }
+    handle @app {
+        reverse_proxy app:8080
+    }
+
+    # ── Default: CASDOOR ──────────────────────────────────────────────
+    # Cubre: UI (/, /home, /apps, /users, /providers, ...), OAuth endpoints
+    # (/login/oauth/*, /callback, /api/login/oauth/*), discovery
+    # (/.well-known/*), admin API (/api/get-*, /api/add-*, ...), recursos
+    # estáticos (/static/*, /resource/*, /storage/*), etc.
+    handle {
+        reverse_proxy casdoor:8000
+    }
+}

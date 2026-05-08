@@ -12,6 +12,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# sed -i portable (BSD/GNU). Usado para .env y para renderizar templates.
+sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
+
 # Colores opcionales
 if [[ -t 1 ]]; then
     BOLD=$'\e[1m'; DIM=$'\e[2m'; OK=$'\e[32m'; WARN=$'\e[33m'; RST=$'\e[0m'
@@ -30,11 +33,12 @@ skip() { echo "  ${DIM}↷ $* (ya hecho)${RST}"; }
 # ------------------------------------------------------------
 step "Verificando secrets/"
 mkdir -p secrets
-if [[ ! -f secrets/casdoor-jwt.pem ]]; then
-    touch secrets/casdoor-jwt.pem
-    done_ "secrets/casdoor-jwt.pem creado (vacío — reemplazar con la PEM real de Casdoor)"
+if [[ ! -d secrets ]]; then
+    mkdir -p secrets
+    done_ "secrets/ creado (carpeta vacía; queda como placeholder por si agregas keys futuras)"
 else
-    skip "secrets/casdoor-jwt.pem existe"
+    skip "secrets/ existe"
+# La app valida JWTs vía JWKS dinámico, no usamos PEM.
 fi
 
 # ------------------------------------------------------------
@@ -55,8 +59,6 @@ if [[ ! -f .env ]]; then
     PW_ZO=$(gen_pw)
     CLIENT_ID=$(gen_id); CLIENT_SECRET=$(gen_secret)
 
-    # sed -i portable (BSD/GNU)
-    sedi() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
     sedi -e "s|CHANGE_ME_ROOT|${PW_ROOT}|g" \
          -e "s|CHANGE_ME_EINAR|${PW_EINAR}|g" \
          -e "s|CHANGE_ME_CASDOOR|${PW_CASDOOR}|g" \
@@ -94,6 +96,11 @@ CASDOOR_DB_PASSWORD=$(env_get CASDOOR_DB_PASSWORD)
 CASDOOR_DB_NAME=$(env_get CASDOOR_DB_NAME)
 CASDOOR_ADMIN_USERNAME=$(env_get CASDOOR_ADMIN_USERNAME)
 CASDOOR_ADMIN_PASSWORD=$(env_get CASDOOR_ADMIN_PASSWORD)
+CASDOOR_CLIENT_ID=$(env_get CASDOOR_CLIENT_ID)
+CASDOOR_CLIENT_SECRET=$(env_get CASDOOR_CLIENT_SECRET)
+GOOGLE_CLIENT_ID=$(env_get GOOGLE_CLIENT_ID)
+GOOGLE_CLIENT_SECRET=$(env_get GOOGLE_CLIENT_SECRET)
+APP_PUBLIC_URL=$(env_get APP_PUBLIC_URL)
 REDASH_DB_USER=$(env_get REDASH_DB_USER)
 REDASH_DB_PASSWORD=$(env_get REDASH_DB_PASSWORD)
 REDASH_DB_NAME=$(env_get REDASH_DB_NAME)
@@ -210,6 +217,35 @@ done_ "schema actualizado"
 step "Inicializando schema de Redash"
 docker compose --profile tools run --rm redash-init 2>&1 | grep -v "^ \(Container\|Pulled\|Pull\|Status\)" || true
 done_ "schema de Redash listo"
+
+# ------------------------------------------------------------
+# 6.5. Renderizar casdoor/init_data.json desde el template
+# ------------------------------------------------------------
+# Casdoor lee init_data.json al arrancar y crea cualquier objeto
+# declarado que aún no exista en su DB (idempotente: ediciones
+# manuales en la UI ganan hasta el próximo `down -v`).
+# Renderizamos en el host (no en el contenedor) porque la imagen
+# corre como UID 1000 sin write en `/`.
+step "Renderizando casdoor/init_data.json"
+TPL=casdoor/init_data.json.tpl
+OUT=casdoor/init_data.json
+[[ ! -f "$TPL" ]] && { echo "ERROR: falta $TPL" >&2; exit 1; }
+cp "$TPL" "$OUT"
+# Mantener sincronizado con los placeholders del template.
+for var in APP_PUBLIC_URL CASDOOR_CLIENT_ID CASDOOR_CLIENT_SECRET \
+           GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET; do
+    val="${!var:-}"
+    if [[ -z "$val" ]]; then
+        echo "  ${WARN}⚠${RST} \$$var vacía; el placeholder quedará literal en $OUT"
+        continue
+    fi
+    sedi "s|\${$var}|${val}|g" "$OUT"
+done
+if grep -qE '\$\{[A-Z_]+\}' "$OUT"; then
+    echo "  ${WARN}⚠${RST} placeholders sin sustituir en $OUT:"
+    grep -oE '\$\{[A-Z_]+\}' "$OUT" | sort -u | sed 's/^/     - /'
+fi
+done_ "$OUT renderizado"
 
 # ------------------------------------------------------------
 # 7. Levantar el resto del stack

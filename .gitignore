@@ -2,6 +2,8 @@
 tmp/
 *.log
 
+google_oauth_client_secret.json
+
 # Go binaries
 *.exe
 *.exe~
@@ -29,8 +31,12 @@ coverage.*
 .env.local
 logs/
 
-# Documentación efimera (planes en evolución, no se versiona)
+# Documentación efímera (planes en evolución, no se versiona)
 docs/
+
+# OpenAPI spec generado por fuego en runtime (no es source of truth)
+doc/
 
 # Secretos montados (PEM, certs, etc.)
 secrets/
+casdoor/init_data.json

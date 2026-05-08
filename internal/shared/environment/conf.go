@@ -48,11 +48,6 @@ type Conf struct {
 	CASDOOR_ORG_NAME string `env:"CASDOOR_ORG_NAME" envDefault:"einar"`
 	CASDOOR_APP_NAME string `env:"CASDOOR_APP_NAME" envDefault:"einar-app"`
 
-	// Clave pública (PEM) para verificar JWTs emitidos por Casdoor.
-	// Opcional: si está vacía, la app debe descargar las llaves vía JWKS
-	// desde CASDOOR_ENDPOINT_INTERNAL.
-	CASDOOR_JWT_PUBLIC_KEY string `env:"CASDOOR_JWT_PUBLIC_KEY"`
-
 	// ------------------------------------------------------------
 	// OAuth2
 	// ------------------------------------------------------------
