@@ -176,6 +176,47 @@ func (a *Admin) CreateGroup(ctx context.Context, name string) (int, error) {
 	return resp.ID, nil
 }
 
+// FindGroupByName busca un group existente por nombre exacto.
+// Devuelve 0, ErrNotFound si no existe.
+// Útil para recovery cuando un signup previo creó el group pero falló
+// después y queremos retomar el provisioning sin duplicar.
+func (a *Admin) FindGroupByName(ctx context.Context, name string) (int, error) {
+	var groups []struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := a.do(ctx, http.MethodGet, "/api/permissions/group", nil, &groups); err != nil {
+		return 0, err
+	}
+	for _, g := range groups {
+		if g.Name == name {
+			return g.ID, nil
+		}
+	}
+	return 0, errors.New("metabase group not found: " + name)
+}
+
+// FindCollectionByName busca una collection top-level (sin parent) por
+// nombre exacto. Mismo uso que FindGroupByName.
+func (a *Admin) FindCollectionByName(ctx context.Context, name string) (int, error) {
+	var collections []struct {
+		ID   any    `json:"id"` // puede ser int o "root"
+		Name string `json:"name"`
+	}
+	if err := a.do(ctx, http.MethodGet, "/api/collection", nil, &collections); err != nil {
+		return 0, err
+	}
+	for _, c := range collections {
+		if c.Name != name {
+			continue
+		}
+		if id, ok := c.ID.(float64); ok {
+			return int(id), nil
+		}
+	}
+	return 0, errors.New("metabase collection not found: " + name)
+}
+
 // CreateCollection crea una collection (folder de dashboards/queries)
 // y devuelve su ID.
 func (a *Admin) CreateCollection(ctx context.Context, name, color string) (int, error) {

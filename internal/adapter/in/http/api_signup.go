@@ -277,23 +277,41 @@ func provisionMetabase(
 	apps domain.EmbeddedAppRepo,
 	tenant *domain.Tenant,
 ) {
-	groupID, err := mb.CreateGroup(ctx, metabase.SlugToGroupName(tenant.Slug))
+	groupName := metabase.SlugToGroupName(tenant.Slug)
+	groupID, err := mb.CreateGroup(ctx, groupName)
 	if err != nil {
-		if errors.Is(err, metabase.ErrAlreadyExists) {
-			slog.Warn("metabase group already exists; skipping provisioning",
-				"tenant", tenant.Slug)
+		if !errors.Is(err, metabase.ErrAlreadyExists) {
+			slog.Error("could not create metabase group",
+				"tenant", tenant.Slug, "err", err)
 			return
 		}
-		slog.Error("could not create metabase group",
-			"tenant", tenant.Slug, "err", err)
-		return
+		// Recovery: signup previo creó el group pero falló después.
+		// Buscamos el ID existente y seguimos el flow.
+		slog.Warn("metabase group already exists; finding existing id",
+			"tenant", tenant.Slug)
+		if groupID, err = mb.FindGroupByName(ctx, groupName); err != nil {
+			slog.Error("metabase group exists but cannot find id",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
 	}
 
-	collectionID, err := mb.CreateCollection(ctx, metabase.SlugToCollectionName(tenant.DisplayName), "")
+	collectionName := metabase.SlugToCollectionName(tenant.DisplayName)
+	collectionID, err := mb.CreateCollection(ctx, collectionName, "")
 	if err != nil {
-		slog.Error("could not create metabase collection",
-			"tenant", tenant.Slug, "err", err)
-		return
+		if !errors.Is(err, metabase.ErrAlreadyExists) {
+			slog.Error("could not create metabase collection",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
+		// Mismo recovery que para group.
+		slog.Warn("metabase collection already exists; finding existing id",
+			"tenant", tenant.Slug)
+		if collectionID, err = mb.FindCollectionByName(ctx, collectionName); err != nil {
+			slog.Error("metabase collection exists but cannot find id",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
 	}
 
 	if err := mb.SetCollectionPermission(ctx, collectionID, groupID, "write"); err != nil {
@@ -310,27 +328,43 @@ func provisionMetabase(
 			"tenant", tenant.Slug, "err", err)
 		return
 	}
+
+	credsValid := true
 	if _, err := mb.CreateUser(ctx, mbEmail, tenant.DisplayName, mbPassword, []int{groupID}); err != nil {
 		if !errors.Is(err, metabase.ErrAlreadyExists) {
 			slog.Error("could not create metabase user",
 				"tenant", tenant.Slug, "err", err)
 			return
 		}
-		slog.Warn("metabase user already existed; creds NOT updated",
-			"tenant", tenant.Slug)
-		// Igual persistimos los IDs (group, collection) que sabemos.
-		_ = tenants.SetMetabaseProvisioning(ctx, tenant.ID, groupID, collectionID, "", "")
-		return
+		// Recovery: el user ya existía. No tenemos su password (Metabase
+		// no la expone), así que los creds "que conoce el shell" quedan
+		// inválidos. Persistimos email vacío para que /credentials muestre
+		// el card vacío con un CTA "Rotar" (futuro: Tier 2.2 de NEXT_STEPS).
+		slog.Warn("metabase user already existed; creds left empty",
+			"tenant", tenant.Slug, "email", mbEmail)
+		credsValid = false
 	}
 
-	if err := tenants.SetMetabaseProvisioning(ctx, tenant.ID, groupID, collectionID, mbEmail, mbPassword); err != nil {
-		slog.Error("could not persist metabase provisioning",
-			"tenant", tenant.Slug, "err", err)
-		return
+	if credsValid {
+		if err := tenants.SetMetabaseProvisioning(ctx, tenant.ID,
+			groupID, collectionID, mbEmail, mbPassword); err != nil {
+			slog.Error("could not persist metabase provisioning",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
+	} else {
+		// Igual persistimos los IDs (group + collection) que conocemos
+		// para que el sidenav muestre Metabase. Email/password vacíos.
+		_ = tenants.SetMetabaseProvisioning(ctx, tenant.ID,
+			groupID, collectionID, "", "")
 	}
 
-	// system embedded_app: "Metabase" en /mb (same-origin path-mode).
+	// system embedded_app: ALWAYS, incluso si el user no se creó con
+	// creds nuevas. La app aparece en sidenav y al click el iframe
+	// muestra el login de Metabase para que el user use sus creds.
 	if _, err := apps.CreateSystem(ctx, tenant.ID, "Metabase", "/mb", nil, 20); err != nil {
+		// Conflict (ya existe) es esperado en re-signup; otros errores
+		// los loggeamos pero no bloqueamos.
 		slog.Warn("could not insert Metabase system app",
 			"tenant", tenant.Slug, "err", err)
 	}
