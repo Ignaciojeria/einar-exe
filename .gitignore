@@ -37,6 +37,13 @@ docs/
 # OpenAPI spec generado por fuego en runtime (no es source of truth)
 doc/
 
+# Build artefacts del SPA (vite output) y deps de node
+web/node_modules/
+internal/web/dist/
+
+# Auto-generado por @tanstack/router-cli al hacer build/dev
+web/src/routeTree.gen.ts
+
 # Secretos montados (PEM, certs, etc.)
 secrets/
 casdoor/init_data.json

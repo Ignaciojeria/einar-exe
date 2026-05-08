@@ -248,6 +248,25 @@ fi
 done_ "$OUT renderizado"
 
 # ------------------------------------------------------------
+# 6.6. Build del SPA (web/) → internal/web/dist/
+# ------------------------------------------------------------
+# El binario Go embebe el bundle Vite vía go:embed (internal/web/embed.go).
+# Sin este folder existente, `go build` falla. Lo generamos cada setup
+# (idempotente: si no hay cambios en web/, vite reusará el cache).
+step "Compilando SPA (web)"
+if [[ ! -d web ]]; then
+    skip "web/ no existe (saltando build SPA)"
+else
+    pushd web >/dev/null
+    if [[ ! -d node_modules ]]; then
+        npm install --no-audit --no-fund --silent
+    fi
+    npm run build --silent
+    popd >/dev/null
+    done_ "internal/web/dist/ generado"
+fi
+
+# ------------------------------------------------------------
 # 7. Levantar el resto del stack
 # ------------------------------------------------------------
 step "Levantando el resto del stack"

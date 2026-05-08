@@ -32,15 +32,26 @@
 
     # ── APP Go: rutas conocidas ───────────────────────────────────────
     @app {
+        # Shell SPA (React)
+        path /                 # landing
+        path /assets/*         # bundle Vite (JS/CSS/svg con hash)
+        path /vite.svg
+        path /favicon.svg
+        path /icons.svg
+        # Auth flow (handlers Go)
         path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh
+        # API de la app
         path /api/me
         path /api/session
         path /api/signup       # crea tenant + asigna user (Fase 1)
         path /api/embedded-apps*
+        path /api/embedded-token
         path /api/tenants*
-        path /signup           # GET público (formulario, futuro shell)
+        # SPA pages servidas por el handler de Go (devuelve index.html)
+        path /signup
         path /signup/*
         path /t/*              # /t/{tenant-slug}/...
+        # Otros
         path /hello            # smoke test
         path /sdk/*            # SDK servido para embedded apps (Fase 4)
     }
