@@ -38,16 +38,11 @@ services:
         condition: service_healthy
       casdoor:
         condition: service_healthy
-    environment:
-      # App (process-level)
-      APP_ENV: ${APP_ENV}
-      APP_PORT: ${APP_PORT}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      PROJECT_NAME: ${PROJECT_NAME:-einar-exe}
-      VERSION: ${VERSION:-}
-      # Backing service: Postgres
-      DATABASE_URL: ${DATABASE_URL}
+    # Sin environment block: el binario Go lee .env directamente via
+    # godotenv (bind-mount en /app/.env). Esto evita doble-fuente y los
+    # problemas de variables del shell pisando al .env.
+    # Si en prod corres sin bind-mount, tú decides: pasas las vars por
+    # `environment:` aquí o las inyectas vía secret manager.
     logging:
       driver: "local"
       options:

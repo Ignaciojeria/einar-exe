@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# scripts/dc — wrapper de docker compose que protege contra shell vars
+# que pisarían los valores de .env.
+#
+# Por qué existe:
+#   La sesión interactiva de pi/agent tiene exportadas variables como
+#   CASDOOR_ORIGIN=http://localhost:8000 (heredadas de un .env viejo).
+#   Docker Compose, cuando ve `${VAR}` en yml, usa el valor del shell
+#   ANTES que el de .env. Eso hace que cada `docker compose up` recree
+#   contenedores con valores stale.
+#
+# Cómo se usa: idéntico a `docker compose`.
+#   ./scripts/dc up -d
+#   ./scripts/dc logs -f app
+#   ./scripts/dc exec db psql -U einar -d einar
+#
+# Si necesitas pasar una var temporal, exportala antes de la línea:
+#   FOO=bar ./scripts/dc up -d
+
+set -euo pipefail
+
+# Lista de vars que viven en .env y que NO queremos que el shell pise.
+# Mantener sincronizada con .env.example.
+PROTECTED_VARS=(
+    APP_ENV
+    APP_PORT
+    APP_PUBLIC_URL
+    APP_OAUTH_REDIRECT_URI
+    LOG_LEVEL
+    PROJECT_NAME
+    VERSION
+    DATABASE_URL
+    POSTGRES_USER
+    POSTGRES_PASSWORD
+    POSTGRES_DB
+    EINAR_DB_NAME
+    EINAR_DB_PASSWORD
+    CASDOOR_DRIVER
+    CASDOOR_DATA_SOURCE
+    CASDOOR_DB_NAME
+    CASDOOR_DB_USER
+    CASDOOR_DB_PASSWORD
+    CASDOOR_PORT
+    CASDOOR_ORIGIN
+    CASDOOR_ORIGIN_FRONTEND
+    CASDOOR_ENDPOINT_INTERNAL
+    CASDOOR_ORG_NAME
+    CASDOOR_APP_NAME
+    CASDOOR_CLIENT_ID
+    CASDOOR_CLIENT_SECRET
+    CASDOOR_ADMIN_USERNAME
+    CASDOOR_ADMIN_PASSWORD
+    GOOGLE_CLIENT_ID
+    GOOGLE_CLIENT_SECRET
+    REDASH_PORT
+    REDASH_DB_NAME
+    REDASH_DB_USER
+    REDASH_DB_PASSWORD
+    REDASH_SECRET_KEY
+    REDASH_COOKIE_SECRET
+    ZO_PORT
+    ZO_ROOT_USER_EMAIL
+    ZO_ROOT_USER_PASSWORD
+)
+
+for var in "${PROTECTED_VARS[@]}"; do
+    unset "$var"
+done
+
+exec docker compose "$@"

@@ -35,9 +35,10 @@
         path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh
         path /api/me
         path /api/session
+        path /api/signup       # crea tenant + asigna user (Fase 1)
         path /api/embedded-apps*
         path /api/tenants*
-        path /signup
+        path /signup           # GET público (formulario, futuro shell)
         path /signup/*
         path /t/*              # /t/{tenant-slug}/...
         path /hello            # smoke test
