@@ -4,78 +4,121 @@ import (
 	"net/http"
 	"time"
 
-	"einar-exe/internal/adapter/out/oidc"
+	"einar-exe/internal/adapter/out/jwtsigner"
+	"einar-exe/internal/domain"
 	"einar-exe/internal/middleware"
 
 	"github.com/Ignaciojeria/ioc"
 	"github.com/go-fuego/fuego"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 var _ = ioc.Register(apiEmbeddedTokenHandler)
 
-// EmbeddedTokenResponse: payload que el SPA pushea por postMessage al iframe.
+// EmbeddedTokenResponse — payload que el SPA pushea por postMessage al iframe.
 type EmbeddedTokenResponse struct {
-	// Token = id_token JWT (mismo que está en cookie HttpOnly).
-	// El iframe lo usará como `Authorization: Bearer <token>` contra el
-	// backend del developer (no el nuestro).
+	// Token = JWT firmado por einar (NO por Casdoor). Lo valida el
+	// backend del developer contra /.well-known/einar/jwks.
+	//
+	// Claims: sub, email, name, tenant_id, tenant_slug, role,
+	//         iss, aud, exp, iat, nbf.
 	Token string `json:"token"`
-	// ExpiresAt: unix seconds. El iframe debe pedir refresh antes de esto.
+
+	// ExpiresAt — unix seconds. El iframe debe pedir refresh antes de esto.
 	ExpiresAt int64 `json:"expiresAt"`
+
+	// Metadata para que el dev configure su validador. También está en
+	// /.well-known/einar/openid-configuration; lo embebemos por
+	// conveniencia.
+	Issuer  string `json:"issuer"`
+	JwksURI string `json:"jwksUri"`
 }
 
 // apiEmbeddedTokenHandler — GET /api/embedded-token
 //
-// Endpoint de bypass del HttpOnly: el SPA llama acá (same-origin, cookie
-// se manda) y obtiene el id_token raw. NO se invoca desde el iframe (el
-// iframe no tiene la cookie, está en otro origin); lo invoca el shell SPA
-// para reenviárselo al iframe via postMessage.
+// Endpoint same-origin con cookie HttpOnly. Mintea un JWT propio de
+// einar con claims ricos (sub, email, tenant_id, tenant_slug, role).
+// El SPA lo recibe y lo pushea al iframe via postMessage; el iframe
+// hace `Authorization: Bearer <token>` contra el backend del dev, que
+// lo valida con la public key de einar.
 //
-// Riesgo aceptado: si el SPA tiene XSS, el atacante puede llamar este
-// endpoint y leer el token. Es el mismo riesgo que cualquier
-// "access-token-en-JS"; lo mitigamos con SPA chico bien auditado y CSP.
+// Por qué un JWT distinto del id_token de Casdoor:
 //
-// El TTL del token es el del id_token original (lo que dice exp). Cuando
-// se vence, el middleware /api/* refresca transparentemente la cookie.
-func apiEmbeddedTokenHandler(api *APIGroup, p *oidc.Provider) {
+//  1. Claims controlables: tenant_id y role no existen en Casdoor.
+//  2. Audience por embed: podemos firmar con audience específica si en
+//     el futuro queremos restringir un token a una embedded app.
+//  3. TTL corto (10min) con refresh transparente desde el SDK.
+//  4. Rotación independiente: rotar la clave de einar NO invalida
+//     sesiones del shell (que usan id_token de Casdoor).
+//
+// Riesgo aceptado: si el SPA sufre XSS, el atacante llama este endpoint
+// y obtiene un JWT con tenant_id + role del user. Mitigación: SPA chico
+// auditado, CSP, TTL corto.
+func apiEmbeddedTokenHandler(
+	api *APIGroup,
+	signer *jwtsigner.Signer,
+	users domain.UserRepo,
+	tenants domain.TenantRepo,
+) {
+	const tokenTTL = 10 * time.Minute
+
 	fuego.Get(api.Server, "/embedded-token", func(c fuego.ContextNoBody) (EmbeddedTokenResponse, error) {
-		// Lectura directa de la cookie (el middleware ya verificó al entrar).
-		cookie, err := c.Cookie("einar_session")
-		if err != nil || cookie.Value == "" {
-			// No debería pasar (middleware bloquea antes), pero defensivo.
-			return EmbeddedTokenResponse{}, fuego.HTTPError{
-				Status: http.StatusUnauthorized,
-				Title:  "no session cookie",
-			}
-		}
-
-		// Re-verificar para extraer el `exp` confiable.
-		idToken, err := p.Verifier.Verify(c.Context(), cookie.Value)
-		if err != nil {
-			return EmbeddedTokenResponse{}, fuego.HTTPError{
-				Status: http.StatusUnauthorized,
-				Title:  "session token invalid",
-				Detail: err.Error(),
-			}
-		}
-
-		// Defensivo: confirmar que el user del context coincide con el
-		// del token. Sin esto, alguien podría cookie-substituir y el
-		// endpoint le devolvería un token random. (El middleware ya
-		// previene esto pero baratísimo de chequear.)
-		if u := middleware.UserFromContext(c.Context()); u == nil {
+		ctx := c.Context()
+		oc := middleware.UserFromContext(ctx)
+		if oc == nil {
 			return EmbeddedTokenResponse{}, fuego.HTTPError{
 				Status: http.StatusInternalServerError,
 				Title:  "user missing in context",
 			}
 		}
 
+		// Resolver tenant del user. Puede no tener si está mid-signup.
+		var tenantID, tenantSlug, role string
+		u, err := users.FindBySub(ctx, oc.Sub)
+		if err != nil {
+			return EmbeddedTokenResponse{}, fuego.HTTPError{
+				Status: http.StatusInternalServerError,
+				Title:  "user lookup failed",
+				Detail: err.Error(),
+			}
+		}
+		if u.HasTenant() {
+			t, err := tenants.FindByID(ctx, *u.TenantID)
+			if err != nil {
+				return EmbeddedTokenResponse{}, fuego.HTTPError{
+					Status: http.StatusInternalServerError,
+					Title:  "tenant lookup failed",
+					Detail: err.Error(),
+				}
+			}
+			tenantID = t.ID.String()
+			tenantSlug = t.Slug
+			role = string(u.Role)
+		}
+
+		token, exp, err := signer.Mint(jwtsigner.Claims{
+			Email:      oc.Email,
+			Name:       oc.Name,
+			TenantID:   tenantID,
+			TenantSlug: tenantSlug,
+			Role:       role,
+			// Subject = sub estable de Casdoor. iss/iat/exp los
+			// completa el signer.
+			RegisteredClaims: jwt.RegisteredClaims{Subject: oc.Sub},
+		}, "" /* audience vacía; futuro: per-embed */, tokenTTL)
+		if err != nil {
+			return EmbeddedTokenResponse{}, fuego.HTTPError{
+				Status: http.StatusInternalServerError,
+				Title:  "could not mint token",
+				Detail: err.Error(),
+			}
+		}
+
 		return EmbeddedTokenResponse{
-			Token:     cookie.Value,
-			ExpiresAt: idToken.Expiry.Unix(),
+			Token:     token,
+			ExpiresAt: exp.Unix(),
+			Issuer:    signer.Issuer(),
+			JwksURI:   signer.Issuer() + "/.well-known/einar/jwks",
 		}, nil
 	})
-
-	// (no-op para silenciar import time; lo dejamos por si en el futuro
-	// agregamos validación de TTL mínimo aquí)
-	_ = time.Second
 }

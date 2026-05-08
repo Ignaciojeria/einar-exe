@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>einar embedded app with backend</title>
+    <!--
+      SDK del shell. Este script registra `window.einar`. La URL es la
+      del shell donde se va a embeber tu app (en este ejemplo, prod).
+      Para dev local del shell mismo, cambialo por http://localhost:8000/sdk/v1.js.
+    -->
+    <script src="https://einar.exe.xyz/sdk/v1.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

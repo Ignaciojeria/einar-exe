@@ -9,8 +9,15 @@ interface Props {
 }
 
 interface TokenResponse {
+  // JWT firmado por einar (RS256). Validable por el backend del dev
+  // contra issuer/jwksUri.
+  // (Antes de la migración a einar-signed JWT esto era el id_token de
+  //  Casdoor; ahora es un token con claims tenant_*).
+
   token: string;
   expiresAt: number; // unix seconds
+  issuer: string;
+  jwksUri: string;
 }
 
 // Protocolo postMessage v1 (sincronizado con web/public/sdk/v1.js).
@@ -110,6 +117,9 @@ function CrossOriginFrame({ app, user }: { app: EmbeddedApp; user: SessionUser }
           version: PROTOCOL_VERSION,
           token: t.token,
           expiresAt: t.expiresAt,
+          // Metadata para que el backend del dev sepa dónde validar:
+          issuer: t.issuer,
+          jwksUri: t.jwksUri,
           user,
         },
         app.origin,

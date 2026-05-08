@@ -81,6 +81,15 @@ type Conf struct {
 	CASDOOR_CLIENT_ID      string `env:"CASDOOR_CLIENT_ID,required"`
 	CASDOOR_CLIENT_SECRET  string `env:"CASDOOR_CLIENT_SECRET,required"`
 	APP_OAUTH_REDIRECT_URI string `env:"APP_OAUTH_REDIRECT_URI,required"`
+
+	// ------------------------------------------------------------
+	// einar JWT signer (para tokens de embedded apps)
+	// ------------------------------------------------------------
+	// Clave privada RSA en formato PEM (PKCS1 o PKCS8). Puede ser el PEM
+	// directo o un path a un archivo. Si está vacía, se genera una clave
+	// ephemeral al startup (OK para dev, NO para prod — los tokens emitidos
+	// no sobreviven al restart).
+	EINAR_JWT_PRIVATE_KEY string `env:"EINAR_JWT_PRIVATE_KEY"`
 }
 
 func NewConf() (Conf, error) {

@@ -42,6 +42,8 @@
     let token = null;
     let expiresAt = 0;
     let user = null;
+    let issuer = null;
+    let jwksUri = null;
     const authListeners = [];
     const sessionEndedListeners = [];
 
@@ -67,7 +69,9 @@
           token = msg.token;
           expiresAt = msg.expiresAt;
           user = msg.user;
-          authListeners.forEach((cb) => { try { cb({ token, user, expiresAt }); } catch (_) {} });
+          issuer = msg.issuer || null;
+          jwksUri = msg.jwksUri || null;
+          authListeners.forEach((cb) => { try { cb({ token, user, expiresAt, issuer, jwksUri }); } catch (_) {} });
           if (readyResolve) { readyResolve(); readyResolve = null; }
           break;
         case 'einar:session-ended':
@@ -102,6 +106,13 @@
         },
         getUser: function () { return user; },
         getExpiresAt: function () { return expiresAt; },
+
+        // Metadata para que el backend del dev sepa dónde validar:
+        //   issuer  → claim 'iss' del JWT
+        //   jwksUri → endpoint público con la public key (RS256)
+        // Discovery doc completo: <issuer>/.well-known/einar/openid-configuration
+        getIssuer:  function () { return issuer; },
+        getJwksUri: function () { return jwksUri; },
 
         onAuth: function (cb) {
           authListeners.push(cb);
