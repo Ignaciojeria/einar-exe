@@ -25,9 +25,13 @@ type Tenant struct {
 	Slug                    string  // /t/{slug}/...
 	DisplayName             string  // nombre humano-friendly
 	CasdoorOrg              *string // nullable hasta provisioning
-	OpenObserveOrgID        *string // identifier random asignado por OO; nullable
-	OpenObserveUserEmail    *string // user dedicado por tenant en OO
-	OpenObserveUserPassword *string // sensible; ver TODO de encriptación at-rest
+	OpenObserveOrgID        *string
+	OpenObserveUserEmail    *string
+	OpenObserveUserPassword *string
+	MetabaseGroupID         *int
+	MetabaseCollectionID    *int
+	MetabaseUserEmail       *string
+	MetabaseUserPassword    *string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 }
@@ -78,6 +82,11 @@ type TenantRepo interface {
 	// SetOpenObserveCredentials guarda el user/pwd dedicado del tenant
 	// en OO. Se llama una vez al signup y al rotar.
 	SetOpenObserveCredentials(ctx context.Context, id uuid.UUID, email, password string) error
+
+	// SetMetabaseProvisioning guarda los IDs y credenciales que Metabase
+	// asignó al tenant en una sola transacción lógica.
+	SetMetabaseProvisioning(ctx context.Context, id uuid.UUID,
+		groupID, collectionID int, email, password string) error
 
 	// FindBySlug devuelve el tenant o ErrNotFound.
 	FindBySlug(ctx context.Context, slug string) (*Tenant, error)

@@ -101,12 +101,13 @@ CASDOOR_CLIENT_SECRET=$(env_get CASDOOR_CLIENT_SECRET)
 GOOGLE_CLIENT_ID=$(env_get GOOGLE_CLIENT_ID)
 GOOGLE_CLIENT_SECRET=$(env_get GOOGLE_CLIENT_SECRET)
 APP_PUBLIC_URL=$(env_get APP_PUBLIC_URL)
-REDASH_DB_USER=$(env_get REDASH_DB_USER)
-REDASH_DB_PASSWORD=$(env_get REDASH_DB_PASSWORD)
-REDASH_DB_NAME=$(env_get REDASH_DB_NAME)
+METABASE_DB_USER=$(env_get METABASE_DB_USER)
+METABASE_DB_PASSWORD=$(env_get METABASE_DB_PASSWORD)
+METABASE_DB_NAME=$(env_get METABASE_DB_NAME)
+METABASE_ADMIN_EMAIL=$(env_get METABASE_ADMIN_EMAIL)
+METABASE_ADMIN_PASSWORD=$(env_get METABASE_ADMIN_PASSWORD)
 APP_PORT=$(env_get APP_PORT)
 CASDOOR_PORT=$(env_get CASDOOR_PORT)
-REDASH_PORT=$(env_get REDASH_PORT)
 
 # ------------------------------------------------------------
 # 2. Postgres up
@@ -172,16 +173,16 @@ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${CASDOOR_DB_USER}') THEN
         CREATE ROLE "${CASDOOR_DB_USER}" LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
     END IF;
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${REDASH_DB_USER}') THEN
-        CREATE ROLE "${REDASH_DB_USER}" LOGIN PASSWORD '${REDASH_DB_PASSWORD}';
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${METABASE_DB_USER}') THEN
+        CREATE ROLE "${METABASE_DB_USER}" LOGIN PASSWORD '${METABASE_DB_PASSWORD}';
     END IF;
 END\$\$;
 
-ALTER ROLE "${EINAR_DB_USER}"   WITH LOGIN PASSWORD '${EINAR_DB_PASSWORD}';
-ALTER ROLE "${CASDOOR_DB_USER}" WITH LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
-ALTER ROLE "${REDASH_DB_USER}"  WITH LOGIN PASSWORD '${REDASH_DB_PASSWORD}';
+ALTER ROLE "${EINAR_DB_USER}"    WITH LOGIN PASSWORD '${EINAR_DB_PASSWORD}';
+ALTER ROLE "${CASDOOR_DB_USER}"  WITH LOGIN PASSWORD '${CASDOOR_DB_PASSWORD}' CREATEDB;
+ALTER ROLE "${METABASE_DB_USER}" WITH LOGIN PASSWORD '${METABASE_DB_PASSWORD}';
 EOF
-done_ "usuarios einar, casdoor y redash"
+done_ "usuarios einar, casdoor y metabase"
 
 # CREATE DATABASE no soporta IF NOT EXISTS: usamos \gexec condicional.
 psql_root <<EOF >/dev/null
@@ -191,10 +192,10 @@ EOF
 done_ "database ${CASDOOR_DB_NAME}"
 
 psql_root <<EOF >/dev/null
-SELECT 'CREATE DATABASE "${REDASH_DB_NAME}" OWNER "${REDASH_DB_USER}"'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${REDASH_DB_NAME}')\gexec
+SELECT 'CREATE DATABASE "${METABASE_DB_NAME}" OWNER "${METABASE_DB_USER}"'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${METABASE_DB_NAME}')\gexec
 EOF
-done_ "database ${REDASH_DB_NAME}"
+done_ "database ${METABASE_DB_NAME}"
 
 # Asegurar ownership de la DB einar (idempotente).
 psql_root -c "ALTER DATABASE \"${EINAR_DB_NAME}\" OWNER TO \"${EINAR_DB_USER}\";" >/dev/null
@@ -212,11 +213,11 @@ docker compose --profile tools run --rm migrate 2>&1 | grep -v "^ \(Container\|P
 done_ "schema actualizado"
 
 # ------------------------------------------------------------
-# 6. Redash schema (create_db es idempotente)
+# 6. Metabase: el schema lo crea automáticamente al arrancar (Liquibase
+# embebido). Solo hace falta que la DB y el user existan, lo que ya
+# hicimos arriba. Cuando Metabase esté healthy, setup.sh hace
+# POST /api/setup para crear el admin user idempotentemente (paso 8).
 # ------------------------------------------------------------
-step "Inicializando schema de Redash"
-docker compose --profile tools run --rm redash-init 2>&1 | grep -v "^ \(Container\|Pulled\|Pull\|Status\)" || true
-done_ "schema de Redash listo"
 
 # ------------------------------------------------------------
 # 6.5. Renderizar casdoor/init_data.json desde el template
@@ -305,6 +306,56 @@ EOF
         echo "  ${WARN}⚠${RST} casdoor no quedó healthy a tiempo; salté la rotación del admin."
         echo "     Rerun ./scripts/setup.sh más tarde para reintentar."
     fi
+fi
+
+# ------------------------------------------------------------
+# 9. Bootstrap admin de Metabase
+# ------------------------------------------------------------
+# Metabase la primera vez expone /api/session/properties con un
+# `setup-token`; con él podemos POST /api/setup creando el admin user.
+# Idempotente: si la setup ya corrió, properties no devuelve token y
+# salteamos.
+step "Bootstrap admin de Metabase"
+printf "  esperando metabase healthy"
+mb_ready=false
+for _ in $(seq 1 80); do
+    status=$(docker inspect -f '{{.State.Health.Status}}' einar-exe-metabase-1 2>/dev/null || echo "")
+    if [[ "$status" == "healthy" ]]; then
+        mb_ready=true; break
+    fi
+    printf "."; sleep 2
+done
+echo
+if $mb_ready; then
+    setup_token=$(docker compose exec -T metabase wget -qO- http://localhost:3000/api/session/properties 2>/dev/null \
+        | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('setup-token') or '')" 2>/dev/null || echo "")
+    if [[ -n "$setup_token" ]]; then
+        body=$(python3 -c "import json;print(json.dumps({
+            'token': '${setup_token}',
+            'user': {
+                'first_name': 'Admin',
+                'last_name': '-',
+                'email': '${METABASE_ADMIN_EMAIL}',
+                'password': '${METABASE_ADMIN_PASSWORD}',
+                'site_name': 'einar',
+            },
+            'database': None,
+            'prefs': {
+                'site_name': 'einar',
+                'allow_tracking': False,
+            },
+        }))")
+        docker compose exec -T metabase wget -qO- \
+            --post-data="$body" \
+            --header='Content-Type: application/json' \
+            http://localhost:3000/api/setup >/dev/null 2>&1 \
+            && done_ "admin metabase '${METABASE_ADMIN_EMAIL}' creado" \
+            || echo "  ${WARN}⚠${RST} POST /api/setup falló; revísalo a mano"
+    else
+        skip "setup ya corrió anteriormente"
+    fi
+else
+    echo "  ${WARN}⚠${RST} metabase no quedó healthy a tiempo; salté el bootstrap."
 fi
 
 echo

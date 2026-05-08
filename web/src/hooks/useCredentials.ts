@@ -8,8 +8,17 @@ export interface OpenObserveCreds {
   orgId: string;
 }
 
+export interface MetabaseCreds {
+  loginUrl: string;
+  email: string;
+  password: string;
+  groupId: number;
+  collectionId: number;
+}
+
 export interface Credentials {
   openobserve?: OpenObserveCreds;
+  metabase?: MetabaseCreds;
 }
 
 // staleTime: corto. Las credenciales pueden rotarse desde la UI; queremos

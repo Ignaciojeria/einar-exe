@@ -63,6 +63,16 @@ type Conf struct {
 	ZO_ROOT_USER_PASSWORD string `env:"ZO_ROOT_USER_PASSWORD,required"`
 
 	// ------------------------------------------------------------
+	// Backing service: Metabase (BI / dashboards)
+	// ------------------------------------------------------------
+	METABASE_ENDPOINT_INTERNAL string `env:"METABASE_ENDPOINT_INTERNAL,required"`
+	// Admin user que setup.sh crea via POST /api/setup. El binario Go
+	// hace login con esto para obtener un session token y aprovisionar
+	// groups/users en signup.
+	METABASE_ADMIN_EMAIL    string `env:"METABASE_ADMIN_EMAIL,required"`
+	METABASE_ADMIN_PASSWORD string `env:"METABASE_ADMIN_PASSWORD,required"`
+
+	// ------------------------------------------------------------
 	// OAuth2
 	// ------------------------------------------------------------
 	// Estrategia MVP: JWT puro de Casdoor en cookie HttpOnly. La app no

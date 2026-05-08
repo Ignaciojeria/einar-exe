@@ -37,9 +37,13 @@ const (
 )
 
 // Lista de columnas reusable. Mantener sincronizada con el orden
-// del Scan en findOne / Create.
-const tenantCols = `id, slug, display_name, casdoor_org, openobserve_org_id,
-	openobserve_user_email, openobserve_user_password, created_at, updated_at`
+// del Scan en scanTenant.
+const tenantCols = `id, slug, display_name,
+	casdoor_org,
+	openobserve_org_id, openobserve_user_email, openobserve_user_password,
+	metabase_group_id, metabase_collection_id,
+	metabase_user_email, metabase_user_password,
+	created_at, updated_at`
 
 func (r *tenantRepo) Create(ctx context.Context, slug, displayName string) (*domain.Tenant, error) {
 	q := `
@@ -67,8 +71,10 @@ func scanTenant(row pgx.Row) (*domain.Tenant, error) {
 	var t domain.Tenant
 	err := row.Scan(
 		&t.ID, &t.Slug, &t.DisplayName,
-		&t.CasdoorOrg, &t.OpenObserveOrgID,
-		&t.OpenObserveUserEmail, &t.OpenObserveUserPassword,
+		&t.CasdoorOrg,
+		&t.OpenObserveOrgID, &t.OpenObserveUserEmail, &t.OpenObserveUserPassword,
+		&t.MetabaseGroupID, &t.MetabaseCollectionID,
+		&t.MetabaseUserEmail, &t.MetabaseUserPassword,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
 	return &t, err
@@ -102,6 +108,27 @@ func (r *tenantRepo) SetOpenObserveCredentials(ctx context.Context, id uuid.UUID
 	tag, err := r.pool.Exec(ctx, q, id, email, password)
 	if err != nil {
 		return fmt.Errorf("update tenant openobserve credentials: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func (r *tenantRepo) SetMetabaseProvisioning(
+	ctx context.Context, id uuid.UUID,
+	groupID, collectionID int, email, password string,
+) error {
+	q := `UPDATE tenants
+	         SET metabase_group_id      = $2,
+	             metabase_collection_id = $3,
+	             metabase_user_email    = $4,
+	             metabase_user_password = $5,
+	             updated_at             = now()
+	       WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, groupID, collectionID, email, password)
+	if err != nil {
+		return fmt.Errorf("update tenant metabase provisioning: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return domain.ErrNotFound

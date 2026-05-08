@@ -18,20 +18,23 @@ var _ = ioc.Register(apiCredentialsHandler)
 // excesivo) para que el frontend renderice copy-to-clipboard simple.
 type CredentialsResponse struct {
 	OpenObserve *OpenObserveCreds `json:"openobserve,omitempty"`
-	// Redash, Casdoor, etc. se agregan en sus respectivas fases.
+	Metabase    *MetabaseCreds    `json:"metabase,omitempty"`
+	// Casdoor admin se agrega cuando lleguen los iframes para gestión.
 }
 
 type OpenObserveCreds struct {
-	// LoginURL: dónde el user pega las creds. Mismo dominio shell.
 	LoginURL string `json:"loginUrl"`
-	// Email + Password: las creds del user dedicado al tenant.
-	// Si están vacíos significa que el provisioning falló o no corrió.
-	// El frontend muestra "Rotar" para regenerar.
 	Email    string `json:"email"`
 	Password string `json:"password"`
-	// OrgID: el identifier random de OO. Útil para construir API URLs:
-	// https://einar.exe.xyz/o2/api/{orgId}/_search
-	OrgID string `json:"orgId"`
+	OrgID    string `json:"orgId"`
+}
+
+type MetabaseCreds struct {
+	LoginURL     string `json:"loginUrl"`
+	Email        string `json:"email"`
+	Password     string `json:"password"`
+	GroupID      int    `json:"groupId"`
+	CollectionID int    `json:"collectionId"`
 }
 
 // apiCredentialsHandler — GET /api/credentials
@@ -66,6 +69,19 @@ func apiCredentialsHandler(api *APIGroup, users domain.UserRepo, tenants domain.
 				Email:    *tenant.OpenObserveUserEmail,
 				Password: *tenant.OpenObserveUserPassword,
 				OrgID:    *tenant.OpenObserveOrgID,
+			}
+		}
+
+		if tenant.MetabaseGroupID != nil &&
+			tenant.MetabaseCollectionID != nil &&
+			tenant.MetabaseUserEmail != nil &&
+			tenant.MetabaseUserPassword != nil {
+			resp.Metabase = &MetabaseCreds{
+				LoginURL:     "/mb/auth/login",
+				Email:        *tenant.MetabaseUserEmail,
+				Password:     *tenant.MetabaseUserPassword,
+				GroupID:      *tenant.MetabaseGroupID,
+				CollectionID: *tenant.MetabaseCollectionID,
 			}
 		}
 

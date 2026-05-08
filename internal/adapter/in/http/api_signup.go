@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"einar-exe/internal/adapter/out/casdoor"
+	"einar-exe/internal/adapter/out/metabase"
 	"einar-exe/internal/adapter/out/openobserve"
 	"einar-exe/internal/domain"
 	"einar-exe/internal/middleware"
@@ -62,6 +63,7 @@ func apiSignupHandler(
 	apps domain.EmbeddedAppRepo,
 	cas *casdoor.Admin,
 	oo *openobserve.Admin,
+	mb *metabase.Admin,
 ) {
 	fuego.Post(api.Server, "/signup", func(c fuego.ContextWithBody[SignupRequest]) (SignupResponse, error) {
 		claims := middleware.UserFromContext(c.Context())
@@ -180,6 +182,7 @@ func apiSignupHandler(
 		//    el tenant creado y un job de reconciliación futuro lo arregla.
 		//    No queremos romper signup por una dependencia secundaria.
 		provisionOpenObserve(ctx, oo, tenants, apps, tenant)
+		provisionMetabase(ctx, mb, tenants, apps, tenant)
 
 		return SignupResponse{
 			TenantID:    tenant.ID.String(),
@@ -262,4 +265,78 @@ func provisionOpenObserve(
 
 	slog.Info("openobserve provisioned",
 		"tenant", tenant.Slug, "oo_id", ooID, "oo_user", ooEmail)
+}
+
+// provisionMetabase: crea group + collection + permission + user en
+// Metabase, persiste IDs y credenciales en `tenants`, y registra la
+// embedded_app system. Best-effort.
+func provisionMetabase(
+	ctx context.Context,
+	mb *metabase.Admin,
+	tenants domain.TenantRepo,
+	apps domain.EmbeddedAppRepo,
+	tenant *domain.Tenant,
+) {
+	groupID, err := mb.CreateGroup(ctx, metabase.SlugToGroupName(tenant.Slug))
+	if err != nil {
+		if errors.Is(err, metabase.ErrAlreadyExists) {
+			slog.Warn("metabase group already exists; skipping provisioning",
+				"tenant", tenant.Slug)
+			return
+		}
+		slog.Error("could not create metabase group",
+			"tenant", tenant.Slug, "err", err)
+		return
+	}
+
+	collectionID, err := mb.CreateCollection(ctx, metabase.SlugToCollectionName(tenant.DisplayName), "")
+	if err != nil {
+		slog.Error("could not create metabase collection",
+			"tenant", tenant.Slug, "err", err)
+		return
+	}
+
+	if err := mb.SetCollectionPermission(ctx, collectionID, groupID, "write"); err != nil {
+		// No fatal: el group puede igual ver, solo que perms quedan a
+		// default (sin acceso). Se puede arreglar manual desde la UI de MB.
+		slog.Warn("could not set metabase collection permission",
+			"tenant", tenant.Slug, "err", err)
+	}
+
+	mbEmail := tenant.Slug + "@" + tenant.Slug + ".einar.local"
+	mbPassword, err := metabase.GeneratePassword()
+	if err != nil {
+		slog.Error("could not generate metabase password",
+			"tenant", tenant.Slug, "err", err)
+		return
+	}
+	if _, err := mb.CreateUser(ctx, mbEmail, tenant.DisplayName, mbPassword, []int{groupID}); err != nil {
+		if !errors.Is(err, metabase.ErrAlreadyExists) {
+			slog.Error("could not create metabase user",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
+		slog.Warn("metabase user already existed; creds NOT updated",
+			"tenant", tenant.Slug)
+		// Igual persistimos los IDs (group, collection) que sabemos.
+		_ = tenants.SetMetabaseProvisioning(ctx, tenant.ID, groupID, collectionID, "", "")
+		return
+	}
+
+	if err := tenants.SetMetabaseProvisioning(ctx, tenant.ID, groupID, collectionID, mbEmail, mbPassword); err != nil {
+		slog.Error("could not persist metabase provisioning",
+			"tenant", tenant.Slug, "err", err)
+		return
+	}
+
+	// system embedded_app: "Metabase" en /mb (same-origin path-mode).
+	if _, err := apps.CreateSystem(ctx, tenant.ID, "Metabase", "/mb", nil, 20); err != nil {
+		slog.Warn("could not insert Metabase system app",
+			"tenant", tenant.Slug, "err", err)
+	}
+
+	slog.Info("metabase provisioned",
+		"tenant", tenant.Slug,
+		"group_id", groupID, "collection_id", collectionID,
+		"mb_user", mbEmail)
 }

@@ -1,12 +1,14 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useCredentials, type OpenObserveCreds } from '../hooks/useCredentials';
+import {
+  useCredentials,
+  type OpenObserveCreds,
+  type MetabaseCreds,
+} from '../hooks/useCredentials';
 
-// `/t/$slug/credentials` — credenciales del tenant para sus apps system.
+// `/t/$slug/credentials` — credenciales de las apps system del tenant.
 //
-// Por ahora solo OpenObserve. Cuando lleguen Redash/Casdoor en próximas
-// fases, agregamos sus secciones acá.
-//
+// Cada herramienta tiene su tarjeta con email/password/IDs internos.
 // El layout padre (t.$slug.tsx) ya valida sesión + tenant.
 export const Route = createFileRoute('/t/$slug/credentials')({
   component: CredentialsPage,
@@ -20,45 +22,38 @@ function CredentialsPage() {
       <header>
         <h1 style={s.h1}>App credentials</h1>
         <p style={s.muted}>
-          Credenciales generadas automáticamente al crear el workspace. Úsalas
-          para loguearte en cada herramienta o para llamar sus APIs directamente.
+          Generadas automáticamente al crear el workspace. Úsalas para loguearte
+          en cada herramienta o para llamar sus APIs directamente.
         </p>
       </header>
 
       {isLoading && <div>Cargando…</div>}
-      {error && <ErrorCard message={(error as Error).message} />}
+      {error && <div style={s.cardError}>Error: {(error as Error).message}</div>}
 
-      {data?.openobserve ? (
-        <OpenObserveCard creds={data.openobserve} />
-      ) : (
-        !isLoading && (
-          <div style={s.cardWarn}>
-            No hay credenciales de OpenObserve aún. Probable causa: el
-            provisioning falló al signup. Revisá los logs del backend.
-          </div>
-        )
+      {data?.openobserve && <OpenObserveCard creds={data.openobserve} />}
+      {data?.metabase && <MetabaseCard creds={data.metabase} />}
+
+      {!isLoading && !data?.openobserve && !data?.metabase && (
+        <div style={s.cardWarn}>
+          No hay credenciales aún. Probable causa: el provisioning falló al
+          signup. Revisa los logs del backend.
+        </div>
       )}
     </div>
   );
 }
 
+// ─── Cards por herramienta ────────────────────────────────────────────
+
 function OpenObserveCard({ creds }: { creds: OpenObserveCreds }) {
   return (
-    <section style={s.card}>
-      <header style={s.cardHeader}>
-        <h2 style={s.h2}>OpenObserve</h2>
-        <a href={creds.loginUrl} target="_blank" rel="noreferrer" style={s.linkOut}>
-          Abrir login ↗
-        </a>
-      </header>
-
-      <Field label="Email"   value={creds.email} />
+    <Card title="OpenObserve" loginUrl={creds.loginUrl}>
+      <Field label="Email"    value={creds.email} />
       <Field label="Password" value={creds.password} secret />
       <Field label="Org ID"   value={creds.orgId} />
 
-      <details style={s.details}>
-        <summary style={s.summary}>API endpoints</summary>
-        <pre style={s.pre}>{`# Search logs
+      <Details summary="API endpoints">
+        <Pre>{`# Search logs
 curl -u "${creds.email}:${creds.password}" \\
   https://einar.exe.xyz/o2/api/${creds.orgId}/_search \\
   -H "Content-Type: application/json" \\
@@ -68,8 +63,46 @@ curl -u "${creds.email}:${creds.password}" \\
 curl -u "${creds.email}:${creds.password}" \\
   https://einar.exe.xyz/o2/api/${creds.orgId}/default/_json \\
   -H "Content-Type: application/json" \\
-  -d '[{"level":"info","msg":"hello"}]'`}</pre>
-      </details>
+  -d '[{"level":"info","msg":"hello"}]'`}</Pre>
+      </Details>
+    </Card>
+  );
+}
+
+function MetabaseCard({ creds }: { creds: MetabaseCreds }) {
+  return (
+    <Card title="Metabase" loginUrl={creds.loginUrl}>
+      <Field label="Email"          value={creds.email} />
+      <Field label="Password"       value={creds.password} secret />
+      <Field label="Group ID"       value={String(creds.groupId)} />
+      <Field label="Collection ID"  value={String(creds.collectionId)} />
+
+      <Details summary="API endpoints">
+        <Pre>{`# Login (devuelve session id en cookie/JSON)
+curl -X POST https://einar.exe.xyz/mb/api/session \\
+  -H "Content-Type: application/json" \\
+  -d '{"username":"${creds.email}","password":"${creds.password}"}'
+
+# Listar dashboards de tu collection
+curl https://einar.exe.xyz/mb/api/collection/${creds.collectionId}/items \\
+  -H "X-Metabase-Session: <session_id>"`}</Pre>
+      </Details>
+    </Card>
+  );
+}
+
+// ─── Building blocks ──────────────────────────────────────────────────
+
+function Card({ title, loginUrl, children }: { title: string; loginUrl: string; children: ReactNode }) {
+  return (
+    <section style={s.card}>
+      <header style={s.cardHeader}>
+        <h2 style={s.h2}>{title}</h2>
+        <a href={loginUrl} target="_blank" rel="noreferrer" style={s.linkOut}>
+          Abrir login ↗
+        </a>
+      </header>
+      {children}
     </section>
   );
 }
@@ -103,8 +136,17 @@ function Field({ label, value, secret = false }: { label: string; value: string;
   );
 }
 
-function ErrorCard({ message }: { message: string }) {
-  return <div style={s.cardError}>Error: {message}</div>;
+function Details({ summary, children }: { summary: string; children: ReactNode }) {
+  return (
+    <details style={s.details}>
+      <summary style={s.summary}>{summary}</summary>
+      {children}
+    </details>
+  );
+}
+
+function Pre({ children }: { children: ReactNode }) {
+  return <pre style={s.pre}>{children}</pre>;
 }
 
 const s = {

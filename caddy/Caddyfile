@@ -7,7 +7,7 @@
 # Modelo de ruteo:
 #   - APP captura un set acotado de rutas conocidas (allowlist).
 #   - CASDOOR captura todo lo demás por defecto (UI, OAuth, /.well-known, ...).
-#   - REDASH y OPENOBSERVE bajo subpath con strip-prefix.
+#   - METABASE y OPENOBSERVE bajo subpath.
 #
 # Cuando agregues un endpoint nuevo a la app, agrégalo aquí también.
 
@@ -17,11 +17,23 @@
         format console
     }
 
-    # ── REDASH bajo /redash/* ─────────────────────────────────────────
-    # Strip-prefix: REDASH_BASE_URL en sus env vars debe apuntar a
-    # /redash para que sus links absolutos sean correctos.
-    handle_path /redash/* {
-        reverse_proxy redash-server:5000
+    # ── METABASE bajo /mb/* ──────────────────────────────────────────
+    # Metabase no soporta nativamente path prefix, pero para nuestro caso
+    # de embedding (iframe) basta con strippear el prefijo en la request
+    # y dejar que Metabase responda bajo "/" desde su perspectiva.
+    # MB_SITE_URL le dice cuál es la URL pública (la usa para emails y
+    # signed JWT URLs en el embedding flow).
+    handle_path /mb/* {
+        reverse_proxy metabase:3000
+        # Metabase setea X-Frame-Options: DENY y CSP frame-ancestors 'none'
+        # por default. Como el iframe vive en el mismo eTLD que el shell,
+        # los strippeamos para permitir embed. Equivalente legal:
+        # mismo dominio = misma identidad de seguridad.
+        header -X-Frame-Options
+        header -Content-Security-Policy
+    }
+    handle /mb {
+        redir /mb/ permanent
     }
 
     # ── OPENOBSERVE bajo /o2/* ────────────────────────────────────────
