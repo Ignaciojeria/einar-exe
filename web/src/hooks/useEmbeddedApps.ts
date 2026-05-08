@@ -7,6 +7,7 @@ export interface EmbeddedApp {
   origin: string;
   iconUrl?: string;
   position: number;
+  isSystem: boolean;
 }
 
 interface ListResponse {

@@ -22,6 +22,15 @@ type EmbeddedAppDTO struct {
 	Origin   string  `json:"origin"`
 	IconURL  *string `json:"iconUrl,omitempty"`
 	Position int     `json:"position"`
+	IsSystem bool    `json:"isSystem"`
+}
+
+// EmbeddedAppPatchRequest: body parcial para PATCH. Cualquier campo
+// nil = no tocar; non-nil = aplicar (incluso string vacío limpia el icon).
+type EmbeddedAppPatchRequest struct {
+	Name     *string `json:"name,omitempty"`
+	IconURL  *string `json:"iconUrl,omitempty"`
+	Position *int    `json:"position,omitempty"`
 }
 
 type EmbeddedAppCreateRequest struct {
@@ -133,11 +142,90 @@ func apiEmbeddedAppsHandler(
 		return toDTO(app), nil
 	})
 
-	// ── DELETE ─────────────────────────────────────────────────────────
-	// TODO(fuego): registrar /embedded-apps/{id} cuando confirmemos
-	// el syntax exacto. Por ahora dejamos solo GET/POST que cubren la
-	// demo de Fase 4. El delete lo agregamos cuando lleguemos a la UI
-	// de gestión.
+	// ── DELETE /api/embedded-apps/{id} ─────────────────────────────────
+	// Bridges std (DeleteStd/PatchStd) porque manejamos path params y
+	// status custom (204). El middleware del grupo /api/* sigue corriendo.
+	fuego.DeleteStd(api.Server, "/embedded-apps/{id}", func(w http.ResponseWriter, r *http.Request) {
+		appID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid id", err.Error())
+			return
+		}
+
+		ctx := r.Context()
+		user, tenant, terr := requireUserTenant(ctx, users, tenants)
+		if terr != nil {
+			writeAPIErrorFromHTTPError(w, terr)
+			return
+		}
+		if err := requireOwnerOrAdmin(user); err != nil {
+			writeAPIErrorFromHTTPError(w, err)
+			return
+		}
+
+		if err := apps.Delete(ctx, appID, tenant.ID); err != nil {
+			switch {
+			case errors.Is(err, domain.ErrNotFound):
+				writeAPIError(w, http.StatusNotFound, "app not found", "")
+			case errors.Is(err, domain.ErrInvalidArg):
+				writeAPIError(w, http.StatusForbidden, "cannot delete system app", err.Error())
+			default:
+				writeAPIError(w, http.StatusInternalServerError, "could not delete", err.Error())
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// ── PATCH /api/embedded-apps/{id} ──────────────────────────────────
+	fuego.PatchStd(api.Server, "/embedded-apps/{id}", func(w http.ResponseWriter, r *http.Request) {
+		appID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid id", err.Error())
+			return
+		}
+
+		var body EmbeddedAppPatchRequest
+		if err := decodeJSON(r, &body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid body", err.Error())
+			return
+		}
+		if body.Name != nil {
+			n := strings.TrimSpace(*body.Name)
+			if n == "" {
+				writeAPIError(w, http.StatusBadRequest, "name cannot be empty", "")
+				return
+			}
+			body.Name = &n
+		}
+
+		ctx := r.Context()
+		user, tenant, terr := requireUserTenant(ctx, users, tenants)
+		if terr != nil {
+			writeAPIErrorFromHTTPError(w, terr)
+			return
+		}
+		if err := requireOwnerOrAdmin(user); err != nil {
+			writeAPIErrorFromHTTPError(w, err)
+			return
+		}
+
+		updated, err := apps.Update(ctx, appID, tenant.ID, domain.EmbeddedAppPatch{
+			Name:     body.Name,
+			IconURL:  body.IconURL,
+			Position: body.Position,
+		})
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				writeAPIError(w, http.StatusNotFound, "app not found", "")
+				return
+			}
+			writeAPIError(w, http.StatusInternalServerError, "could not update", err.Error())
+			return
+		}
+
+		writeAPIJSON(w, http.StatusOK, toDTO(updated))
+	})
 }
 
 func toDTO(a *domain.EmbeddedApp) EmbeddedAppDTO {
@@ -147,6 +235,7 @@ func toDTO(a *domain.EmbeddedApp) EmbeddedAppDTO {
 		Origin:   a.Origin,
 		IconURL:  a.IconURL,
 		Position: a.Position,
+		IsSystem: a.IsSystem,
 	}
 }
 
@@ -172,5 +261,3 @@ func validateOrigin(s string) error {
 	return nil
 }
 
-// _ silenciar warning sobre uuid no usado (lo usaremos cuando agreguemos DELETE).
-var _ = uuid.Nil

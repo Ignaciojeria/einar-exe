@@ -64,12 +64,12 @@ function WorkspaceLayout() {
             🧪 Test your app
           </Link>
           <Link
-            to="/t/$slug/apps/new"
+            to="/t/$slug/apps"
             params={{ slug }}
             style={s.navLink}
             activeProps={{ style: { ...s.navLink, ...s.navLinkActive } }}
           >
-            + Registrar app
+            Manage apps
           </Link>
 
           <div style={{ ...s.navHeader, marginTop: '1.5rem' }}>Embedded apps</div>

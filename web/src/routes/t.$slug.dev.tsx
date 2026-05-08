@@ -98,6 +98,7 @@ function DevTester() {
               name: 'Dev tester',
               origin: activeOrigin,
               position: 0,
+              isSystem: false,
             }}
             user={session.user}
           />
