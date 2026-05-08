@@ -25,9 +25,14 @@
     }
 
     # ── OPENOBSERVE bajo /o2/* ────────────────────────────────────────
-    # Igual: ZO_BASE_URI=/o2/ debe configurarse en su env.
-    handle_path /o2/* {
+    # OO corre con ZO_BASE_URI=/o2 → sirve assets bajo /o2/* internamente.
+    # Por eso `handle` y NO `handle_path`: no strippeamos el prefijo.
+    handle /o2/* {
         reverse_proxy openobserve:5080
+    }
+    # /o2 sin slash → redirect al / (estilo nginx).
+    handle /o2 {
+        redir /o2/ permanent
     }
 
     # ── APP Go: rutas conocidas ───────────────────────────────────────
@@ -46,6 +51,7 @@
         path /api/signup       # crea tenant + asigna user (Fase 1)
         path /api/embedded-apps*
         path /api/embedded-token
+        path /api/credentials
         path /api/tenants*
         # SPA pages servidas por el handler de Go (devuelve index.html)
         path /signup

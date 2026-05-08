@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"einar-exe/internal/adapter/out/casdoor"
+	"einar-exe/internal/adapter/out/openobserve"
 	"einar-exe/internal/domain"
 	"einar-exe/internal/middleware"
 
@@ -54,7 +55,14 @@ type SignupResponse struct {
 //                link; un job de reconciliación futuro lo arregla.
 // Si (4) falla → idem; el user puede reintentar /api/signup y caer en
 //                ErrAlreadyExists del slug, que tratamos como recovery.
-func apiSignupHandler(api *APIGroup, tenants domain.TenantRepo, users domain.UserRepo, cas *casdoor.Admin) {
+func apiSignupHandler(
+	api *APIGroup,
+	tenants domain.TenantRepo,
+	users domain.UserRepo,
+	apps domain.EmbeddedAppRepo,
+	cas *casdoor.Admin,
+	oo *openobserve.Admin,
+) {
 	fuego.Post(api.Server, "/signup", func(c fuego.ContextWithBody[SignupRequest]) (SignupResponse, error) {
 		claims := middleware.UserFromContext(c.Context())
 		if claims == nil {
@@ -168,6 +176,11 @@ func apiSignupHandler(api *APIGroup, tenants domain.TenantRepo, users domain.Use
 			}
 		}
 
+		// 5. Aprovisionar OpenObserve org. Best-effort: si falla, dejamos
+		//    el tenant creado y un job de reconciliación futuro lo arregla.
+		//    No queremos romper signup por una dependencia secundaria.
+		provisionOpenObserve(ctx, oo, tenants, apps, tenant)
+
 		return SignupResponse{
 			TenantID:    tenant.ID.String(),
 			Slug:        tenant.Slug,
@@ -175,4 +188,78 @@ func apiSignupHandler(api *APIGroup, tenants domain.TenantRepo, users domain.Use
 			RedirectTo:  "/t/" + tenant.Slug + "/",
 		}, nil
 	})
+
+}
+
+// provisionOpenObserve crea la org del tenant en OO, persiste el ID
+// devuelto, y registra la embedded_app system con el iframe URL.
+//
+// Best-effort: cualquier fallo se loggea pero NO rompe signup. Un job
+// de reconciliación futuro detectará tenants con openobserve_org_id IS NULL
+// y reintenta.
+func provisionOpenObserve(
+	ctx context.Context,
+	oo *openobserve.Admin,
+	tenants domain.TenantRepo,
+	apps domain.EmbeddedAppRepo,
+	tenant *domain.Tenant,
+) {
+	orgName := openobserve.SlugToOrgName(tenant.Slug)
+	ooID, err := oo.CreateOrganization(ctx, orgName)
+	if err != nil {
+		if errors.Is(err, openobserve.ErrAlreadyExists) {
+			slog.Warn("openobserve org already exists; skipping link",
+				"tenant", tenant.Slug)
+			return
+		}
+		slog.Error("could not provision OpenObserve org",
+			"tenant", tenant.Slug, "err", err)
+		return
+	}
+
+	if err := tenants.SetOpenObserveOrgID(ctx, tenant.ID, ooID); err != nil {
+		slog.Error("created OO org but couldn't link to tenant",
+			"tenant", tenant.Slug, "oo_id", ooID, "err", err)
+		return
+	}
+
+	// User dedicado por tenant. Email derivado del slug (único en el
+	// scope de OO). Password random; lo guardamos en plaintext por
+	// ahora (ver migración 0005 para el TODO de encriptación at-rest).
+	ooEmail := tenant.Slug + "@" + tenant.Slug + ".einar.local"
+	ooPassword, err := openobserve.GeneratePassword()
+	if err != nil {
+		slog.Error("could not generate OO password", "tenant", tenant.Slug, "err", err)
+		return
+	}
+	if err := oo.CreateUser(ctx, ooID, ooEmail, ooPassword, "admin"); err != nil {
+		if !errors.Is(err, openobserve.ErrAlreadyExists) {
+			slog.Error("could not create OO user for tenant",
+				"tenant", tenant.Slug, "err", err)
+			return
+		}
+		// Recovery: el user ya existía. No podemos recuperar la password
+		// (OO la hashea), así que la rotamos llamando a UpdateUser. Por
+		// MVP simplemente loggeamos y dejamos las creds como NULL — el user
+		// puede usar "Rotar" desde la UI.
+		slog.Warn("OO user already existed; credentials NOT updated",
+			"tenant", tenant.Slug)
+	} else {
+		if err := tenants.SetOpenObserveCredentials(ctx, tenant.ID, ooEmail, ooPassword); err != nil {
+			slog.Error("created OO user but couldn't persist creds",
+				"tenant", tenant.Slug, "err", err)
+		}
+	}
+
+	// La embedded_app system para OO. `origin` es path-relative ("/o2")
+	// porque vive en el mismo dominio que el shell. El frontend detecta
+	// que el origin empieza con "/" y lo trata como same-origin (no
+	// dispara postMessage handshake).
+	if _, err := apps.CreateSystem(ctx, tenant.ID, "OpenObserve", "/o2", nil, 10); err != nil {
+		slog.Warn("could not insert OpenObserve system app",
+			"tenant", tenant.Slug, "err", err)
+	}
+
+	slog.Info("openobserve provisioned",
+		"tenant", tenant.Slug, "oo_id", ooID, "oo_user", ooEmail)
 }

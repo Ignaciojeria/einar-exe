@@ -199,11 +199,18 @@ services:
 
   openobserve:
     image: public.ecr.aws/zinclabs/openobserve:latest
-    ports:
-      - "${ZO_PORT:-5080}:5080"
+    # Sin ports: solo accesible vía Caddy en /o2/* (ruta pública con
+    # mismo dominio que la app, evita el wall de exe.dev en :5080).
     environment:
       ZO_ROOT_USER_EMAIL: ${ZO_ROOT_USER_EMAIL}
       ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD}
+      # ZO_BASE_URI: prefijo público bajo el que sirve Caddy. OO genera
+      # sus assets/links con este prefix → funcionan a través del strip
+      # de Caddy (`handle_path /o2/*`). Sin esto, los assets se buscan
+      # en /web/* y rompen al estar la app embebida en /o2/web/*.
+      ZO_BASE_URI: /o2
+      # Permitir embed en iframe del shell (mismo origen).
+      ZO_COOKIE_SAME_SITE_LAX: "true"
     volumes:
       - o2data:/data
     restart: unless-stopped

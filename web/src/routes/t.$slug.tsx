@@ -71,6 +71,14 @@ function WorkspaceLayout() {
           >
             Manage apps
           </Link>
+          <Link
+            to="/t/$slug/credentials"
+            params={{ slug }}
+            style={s.navLink}
+            activeProps={{ style: { ...s.navLink, ...s.navLinkActive } }}
+          >
+            🔑 Credentials
+          </Link>
 
           <div style={{ ...s.navHeader, marginTop: '1.5rem' }}>Embedded apps</div>
           {apps.length === 0 ? (

@@ -24,24 +24,58 @@ const REFRESH_BEFORE_EXPIRY_SEC = 60;
 /**
  * EmbeddedAppFrame
  *
- * Renderiza un iframe sandboxed apuntando a `app.origin` y maneja:
+ * Modo de operación según el `app.origin`:
  *
- *  1. Handshake: escucha 'einar:ready' del iframe → manda 'einar:auth'.
- *  2. Refresh proactivo: timer que renueva el token antes del exp y lo
- *     re-pushea al iframe.
- *  3. Refresh on-demand: si el iframe manda 'einar:refresh' (porque su
- *     SDK detectó token cercano a vencer), lo refrescamos también.
- *  4. Logout: 'einar:logout' del iframe → window.location = /auth/logout.
+ *  - Same-origin path-mode (origin empieza con "/", ej. "/o2"):
+ *      System apps que viven bajo el mismo dominio vía Caddy. Comparten
+ *      cookies con el shell, no se necesita postMessage handshake. El
+ *      iframe carga directo y la auth la maneja el cookie nativo de la
+ *      tool (OpenObserve, Redash). En MVP el user logueó una vez y la
+ *      cookie persiste.
+ *
+ *  - Cross-origin (origin = "https://app.dev.com" o similar):
+ *      Custom apps de terceros. Hace falta el protocolo postMessage
+ *      completo: handshake, push de token, refresh proactivo, logout.
  *
  * Seguridad:
- *   - Origin check estricto: solo respondemos a mensajes con
- *     event.origin === app.origin.
- *   - El postMessage del shell SIEMPRE va a app.origin, nunca '*'.
+ *   - Origin check estricto en cross-origin: solo respondemos a mensajes
+ *     con event.origin === app.origin. El postMessage al iframe siempre
+ *     a app.origin, nunca '*'.
  *   - Sandbox del iframe: allow-scripts + allow-same-origin permite que
  *     la app del dev haga su trabajo, pero impide formularios cross-site
  *     y popups no autorizados.
  */
 export default function EmbeddedAppFrame({ app, user }: Props) {
+  const isSameOrigin = app.origin.startsWith('/');
+
+  if (isSameOrigin) {
+    return <SameOriginFrame app={app} />;
+  }
+  return <CrossOriginFrame app={app} user={user} />;
+}
+
+function SameOriginFrame({ app }: { app: EmbeddedApp }) {
+  // Para system apps (OO, Redash) el iframe carga directo. La auth la
+  // maneja la propia tool con su cookie. Sin postMessage involved.
+  //
+  // El sandbox es más permisivo porque confíamos en la tool (la
+  // aprovisionamos nosotros). allow-same-origin es necesario para que
+  // su SPA acceda a localStorage / cookies propias.
+  const src = app.origin.endsWith('/') ? app.origin : app.origin + '/';
+  return (
+    <iframe
+      src={src}
+      title={app.name}
+      style={s.iframe}
+      // Sin sandbox attribute = permisos completos del browser. Es
+      // intencional para system apps que necesitan storage, cookies
+      // SameSite, popups de auth, etc. La aislación viene del navegador
+      // tratando el iframe como su propio contexto.
+    />
+  );
+}
+
+function CrossOriginFrame({ app, user }: { app: EmbeddedApp; user: SessionUser }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +198,8 @@ export default function EmbeddedAppFrame({ app, user }: Props) {
     />
   );
 }
+
+
 
 const s = {
   iframe: {

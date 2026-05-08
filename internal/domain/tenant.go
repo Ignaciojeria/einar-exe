@@ -21,12 +21,15 @@ var (
 
 // Tenant = workspace en la plataforma. Aísla users y embedded apps.
 type Tenant struct {
-	ID          uuid.UUID
-	Slug        string  // /t/{slug}/...
-	DisplayName string  // nombre humano-friendly
-	CasdoorOrg  *string // nullable: hasta que se aprovisione (Fase 5+)
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID                      uuid.UUID
+	Slug                    string  // /t/{slug}/...
+	DisplayName             string  // nombre humano-friendly
+	CasdoorOrg              *string // nullable hasta provisioning
+	OpenObserveOrgID        *string // identifier random asignado por OO; nullable
+	OpenObserveUserEmail    *string // user dedicado por tenant en OO
+	OpenObserveUserPassword *string // sensible; ver TODO de encriptación at-rest
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // Role dentro de un tenant.
@@ -67,6 +70,14 @@ type TenantRepo interface {
 
 	// SetCasdoorOrg marca el tenant como aprovisionado en Casdoor.
 	SetCasdoorOrg(ctx context.Context, id uuid.UUID, orgName string) error
+
+	// SetOpenObserveOrgID guarda el identifier que devolvió OpenObserve
+	// al crear la org. Lo necesitamos para construir URLs de iframe.
+	SetOpenObserveOrgID(ctx context.Context, id uuid.UUID, orgID string) error
+
+	// SetOpenObserveCredentials guarda el user/pwd dedicado del tenant
+	// en OO. Se llama una vez al signup y al rotar.
+	SetOpenObserveCredentials(ctx context.Context, id uuid.UUID, email, password string) error
 
 	// FindBySlug devuelve el tenant o ErrNotFound.
 	FindBySlug(ctx context.Context, slug string) (*Tenant, error)

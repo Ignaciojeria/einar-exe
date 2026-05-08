@@ -49,6 +49,20 @@ type Conf struct {
 	CASDOOR_APP_NAME string `env:"CASDOOR_APP_NAME" envDefault:"einar-app"`
 
 	// ------------------------------------------------------------
+	// Backing service: OpenObserve (logs/metrics/traces)
+	// ------------------------------------------------------------
+	// Endpoint interno (server-to-server). Incluye el `ZO_BASE_URI`
+	// que se setea en el container, ya que toda la API de OO vive bajo
+	// ese prefijo (ej. http://openobserve:5080/o2).
+	OPENOBSERVE_ENDPOINT_INTERNAL string `env:"OPENOBSERVE_ENDPOINT_INTERNAL,required"`
+
+	// Credenciales del root user de OpenObserve. Son las mismas que el
+	// container recibe (ZO_ROOT_USER_*); las re-leemos en el binario Go
+	// porque las usamos como admin auth para aprovisionar orgs.
+	ZO_ROOT_USER_EMAIL    string `env:"ZO_ROOT_USER_EMAIL,required"`
+	ZO_ROOT_USER_PASSWORD string `env:"ZO_ROOT_USER_PASSWORD,required"`
+
+	// ------------------------------------------------------------
 	// OAuth2
 	// ------------------------------------------------------------
 	// Estrategia MVP: JWT puro de Casdoor en cookie HttpOnly. La app no

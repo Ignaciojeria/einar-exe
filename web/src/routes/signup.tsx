@@ -1,6 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { createFileRoute, redirect } from '@tanstack/react-router';
 import { api, ApiError } from '../api/client';
 import { sessionQuery } from '../hooks/useSession';
 
@@ -34,9 +33,6 @@ export const Route = createFileRoute('/signup')({
 });
 
 function SignupPage() {
-  const nav = useNavigate();
-  const qc = useQueryClient();
-
   const [slug, setSlug] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -54,9 +50,11 @@ function SignupPage() {
           displayName: displayName.trim(),
         },
       });
-      // Invalidar sesión: ahora trae tenantSlug.
-      await qc.invalidateQueries({ queryKey: ['session'] });
-      nav({ to: '/t/$slug', params: { slug: res.slug }, replace: true });
+      // Full reload tras signup: garantiza cache limpio (queries de
+      // sesión + embedded-apps + credentials se hidratan desde cero
+      // con el tenant ya asignado). Ahorra debug de race conditions.
+      window.location.href = res.redirectTo;
+      return;
     } catch (err) {
       if (err instanceof ApiError) setError(err.detail || err.message);
       else setError('Error inesperado.');

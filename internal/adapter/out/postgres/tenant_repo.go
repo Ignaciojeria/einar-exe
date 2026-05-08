@@ -36,16 +36,17 @@ const (
 	pgErrCodeCheckViolation = "23514"
 )
 
+// Lista de columnas reusable. Mantener sincronizada con el orden
+// del Scan en findOne / Create.
+const tenantCols = `id, slug, display_name, casdoor_org, openobserve_org_id,
+	openobserve_user_email, openobserve_user_password, created_at, updated_at`
+
 func (r *tenantRepo) Create(ctx context.Context, slug, displayName string) (*domain.Tenant, error) {
-	const q = `
+	q := `
 		INSERT INTO tenants (slug, display_name)
 		VALUES ($1, $2)
-		RETURNING id, slug, display_name, casdoor_org, created_at, updated_at
-	`
-	var t domain.Tenant
-	err := r.pool.QueryRow(ctx, q, slug, displayName).Scan(
-		&t.ID, &t.Slug, &t.DisplayName, &t.CasdoorOrg, &t.CreatedAt, &t.UpdatedAt,
-	)
+		RETURNING ` + tenantCols
+	t, err := scanTenant(r.pool.QueryRow(ctx, q, slug, displayName))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
@@ -58,7 +59,19 @@ func (r *tenantRepo) Create(ctx context.Context, slug, displayName string) (*dom
 		}
 		return nil, fmt.Errorf("insert tenant: %w", err)
 	}
-	return &t, nil
+	return t, nil
+}
+
+// scanTenant centraliza el Scan en el mismo orden que `tenantCols`.
+func scanTenant(row pgx.Row) (*domain.Tenant, error) {
+	var t domain.Tenant
+	err := row.Scan(
+		&t.ID, &t.Slug, &t.DisplayName,
+		&t.CasdoorOrg, &t.OpenObserveOrgID,
+		&t.OpenObserveUserEmail, &t.OpenObserveUserPassword,
+		&t.CreatedAt, &t.UpdatedAt,
+	)
+	return &t, err
 }
 
 func (r *tenantRepo) Delete(ctx context.Context, id uuid.UUID) error {
@@ -73,16 +86,41 @@ func (r *tenantRepo) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (r *tenantRepo) SetCasdoorOrg(ctx context.Context, id uuid.UUID, orgName string) error {
-	const q = `UPDATE tenants
-	              SET casdoor_org = $2, updated_at = now()
-	            WHERE id = $1`
-	tag, err := r.pool.Exec(ctx, q, id, orgName)
+	return r.setOrgRef(ctx, id, "casdoor_org", orgName)
+}
+
+func (r *tenantRepo) SetOpenObserveOrgID(ctx context.Context, id uuid.UUID, orgID string) error {
+	return r.setOrgRef(ctx, id, "openobserve_org_id", orgID)
+}
+
+func (r *tenantRepo) SetOpenObserveCredentials(ctx context.Context, id uuid.UUID, email, password string) error {
+	q := `UPDATE tenants
+	         SET openobserve_user_email    = $2,
+	             openobserve_user_password = $3,
+	             updated_at                = now()
+	       WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, email, password)
+	if err != nil {
+		return fmt.Errorf("update tenant openobserve credentials: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// setOrgRef centraliza UPDATE de cualquier columna `*_org*` que linkee
+// al tenant con un sistema externo. La columna se inyecta hardcoded
+// (whitelist arriba), no viene del cliente, no hay riesgo de SQLi.
+func (r *tenantRepo) setOrgRef(ctx context.Context, id uuid.UUID, col, val string) error {
+	q := fmt.Sprintf(`UPDATE tenants SET %s = $2, updated_at = now() WHERE id = $1`, col)
+	tag, err := r.pool.Exec(ctx, q, id, val)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgErrCodeUniqueViolation {
-			return fmt.Errorf("casdoor_org %q already linked: %w", orgName, domain.ErrConflict)
+			return fmt.Errorf("%s %q already linked: %w", col, val, domain.ErrConflict)
 		}
-		return fmt.Errorf("update tenant.casdoor_org: %w", err)
+		return fmt.Errorf("update tenant.%s: %w", col, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return domain.ErrNotFound
@@ -91,27 +129,20 @@ func (r *tenantRepo) SetCasdoorOrg(ctx context.Context, id uuid.UUID, orgName st
 }
 
 func (r *tenantRepo) FindBySlug(ctx context.Context, slug string) (*domain.Tenant, error) {
-	return r.findOne(ctx,
-		`SELECT id, slug, display_name, casdoor_org, created_at, updated_at
-		   FROM tenants WHERE slug = $1`, slug)
+	return r.findOne(ctx, `SELECT `+tenantCols+` FROM tenants WHERE slug = $1`, slug)
 }
 
 func (r *tenantRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.Tenant, error) {
-	return r.findOne(ctx,
-		`SELECT id, slug, display_name, casdoor_org, created_at, updated_at
-		   FROM tenants WHERE id = $1`, id)
+	return r.findOne(ctx, `SELECT `+tenantCols+` FROM tenants WHERE id = $1`, id)
 }
 
 func (r *tenantRepo) findOne(ctx context.Context, q string, arg any) (*domain.Tenant, error) {
-	var t domain.Tenant
-	err := r.pool.QueryRow(ctx, q, arg).Scan(
-		&t.ID, &t.Slug, &t.DisplayName, &t.CasdoorOrg, &t.CreatedAt, &t.UpdatedAt,
-	)
+	t, err := scanTenant(r.pool.QueryRow(ctx, q, arg))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("select tenant: %w", err)
 	}
-	return &t, nil
+	return t, nil
 }
