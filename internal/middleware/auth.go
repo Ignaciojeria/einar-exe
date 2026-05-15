@@ -10,7 +10,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -63,12 +65,13 @@ type Auth struct {
 	provider *oidc.Provider
 	env      environment.Conf
 	users    domain.UserRepo
+	tenants  domain.TenantRepo
 	tokens   domain.APITokenRepo
 	sf       singleflight.Group
 }
 
-func NewAuth(p *oidc.Provider, env environment.Conf, users domain.UserRepo, tokens domain.APITokenRepo) *Auth {
-	return &Auth{provider: p, env: env, users: users, tokens: tokens}
+func NewAuth(p *oidc.Provider, env environment.Conf, users domain.UserRepo, tenants domain.TenantRepo, tokens domain.APITokenRepo) *Auth {
+	return &Auth{provider: p, env: env, users: users, tenants: tenants, tokens: tokens}
 }
 
 func (a *Auth) Require() func(http.Handler) http.Handler {
@@ -168,12 +171,106 @@ func (a *Auth) tryBearerToken(r *http.Request) (*oidc.Claims, []string, bool) {
 		e := claims.Email
 		emailPtr = &e
 	}
-	if _, err := a.users.EnsureBySub(r.Context(), claims.Sub, emailPtr); err != nil {
+	user, err := a.users.EnsureBySub(r.Context(), claims.Sub, emailPtr)
+	if err != nil {
+		return nil, nil, false
+	}
+	if err := a.ensureTenantForUser(r.Context(), user, claims); err != nil {
 		return nil, nil, false
 	}
 
 	// OIDC bearer obtiene permisos completos de sesión web.
 	return claims, []string{"*"}, true
+}
+
+var tenantSlugCleaner = regexp.MustCompile(`[^a-z0-9]+`)
+
+func (a *Auth) ensureTenantForUser(ctx context.Context, user *domain.User, claims *oidc.Claims) error {
+	if user.HasTenant() {
+		return nil
+	}
+
+	displayName := strings.TrimSpace(claims.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(claims.Name)
+	}
+	if displayName == "" {
+		displayName = "My Workspace"
+	}
+
+	base := tenantBaseSlug(claims)
+	lastErr := error(nil)
+	for i := 0; i < 8; i++ {
+		slug := base
+		if i > 0 {
+			suffix := fmt.Sprintf("-%d", i+1)
+			if len(slug)+len(suffix) > 32 {
+				slug = slug[:32-len(suffix)]
+				slug = strings.Trim(slug, "-")
+			}
+			slug += suffix
+		}
+
+		t, err := a.tenants.Create(ctx, slug, displayName)
+		if err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+		if err := a.users.AssignTenant(ctx, user.ID, t.ID, domain.RoleOwner); err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("could not auto-provision tenant")
+}
+
+func tenantBaseSlug(claims *oidc.Claims) string {
+	candidate := ""
+	if at := strings.Index(claims.Email, "@"); at > 0 {
+		candidate = claims.Email[:at]
+	}
+	if candidate == "" {
+		candidate = claims.DisplayName
+	}
+	if candidate == "" {
+		candidate = claims.Name
+	}
+	if candidate == "" {
+		candidate = claims.Sub
+	}
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	candidate = tenantSlugCleaner.ReplaceAllString(candidate, "-")
+	candidate = strings.Trim(candidate, "-")
+	if len(candidate) > 32 {
+		candidate = candidate[:32]
+		candidate = strings.Trim(candidate, "-")
+	}
+	if len(candidate) < 3 {
+		candidate = "team-" + candidate
+	}
+	if len(candidate) < 3 {
+		candidate = "team"
+	}
+	if len(candidate) > 32 {
+		candidate = candidate[:32]
+		candidate = strings.Trim(candidate, "-")
+	}
+	if strings.HasPrefix(candidate, "-") || strings.HasSuffix(candidate, "-") {
+		candidate = strings.Trim(candidate, "-")
+	}
+	if len(candidate) < 3 {
+		candidate = "team"
+	}
+	return candidate
 }
 
 func (a *Auth) tryRefresh(w http.ResponseWriter, r *http.Request) (*oidc.Claims, error) {
