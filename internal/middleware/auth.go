@@ -1,7 +1,7 @@
 // Package middleware contiene middlewares HTTP reutilizables.
 //
-// Auth: valida cookie de sesión OIDC o Bearer PAT para clientes CLI,
-// y coloca claims/scopes en el context.
+// Auth: valida cookie de sesión OIDC o Bearer token para clientes CLI
+// (PAT propio o id_token OIDC de Casdoor) y coloca claims/scopes en el context.
 package middleware
 
 import (
@@ -87,7 +87,7 @@ func (a *Auth) Require() func(http.Handler) http.Handler {
 }
 
 func (a *Auth) authenticate(w http.ResponseWriter, r *http.Request) (*oidc.Claims, []string, error) {
-	if claims, scopes, ok := a.tryBearerPAT(r); ok {
+	if claims, scopes, ok := a.tryBearerToken(r); ok {
 		return claims, scopes, nil
 	}
 
@@ -120,7 +120,7 @@ func (a *Auth) authenticate(w http.ResponseWriter, r *http.Request) (*oidc.Claim
 	return claims, []string{"*"}, nil
 }
 
-func (a *Auth) tryBearerPAT(r *http.Request) (*oidc.Claims, []string, bool) {
+func (a *Auth) tryBearerToken(r *http.Request) (*oidc.Claims, []string, bool) {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if h == "" || !strings.HasPrefix(strings.ToLower(h), "bearer ") {
 		return nil, nil, false
@@ -130,24 +130,50 @@ func (a *Auth) tryBearerPAT(r *http.Request) (*oidc.Claims, []string, bool) {
 		return nil, nil, false
 	}
 
+	// 1) Intentar como PAT interno (hash lookup en DB).
 	sum := sha256.Sum256([]byte(raw))
 	tokenHash := hex.EncodeToString(sum[:])
-
 	tok, err := a.tokens.FindActiveByHash(r.Context(), tokenHash)
-	if err != nil {
-		return nil, nil, false
-	}
-	user, err := a.users.FindByID(r.Context(), tok.UserID)
-	if err != nil {
-		return nil, nil, false
-	}
-	_ = a.tokens.TouchLastUsed(r.Context(), tok.ID)
+	if err == nil {
+		user, err := a.users.FindByID(r.Context(), tok.UserID)
+		if err != nil {
+			return nil, nil, false
+		}
+		_ = a.tokens.TouchLastUsed(r.Context(), tok.ID)
 
-	claims := &oidc.Claims{Sub: user.CasdoorSub}
-	if user.Email != nil {
-		claims.Email = *user.Email
+		claims := &oidc.Claims{Sub: user.CasdoorSub}
+		if user.Email != nil {
+			claims.Email = *user.Email
+		}
+		return claims, tok.Scopes, true
 	}
-	return claims, tok.Scopes, true
+
+	// 2) Fallback: intentar como id_token OIDC emitido por Casdoor
+	// (útil para CLI con login PKCE sin pedir API key/PAT manual).
+	idToken, err := a.provider.Verifier.Verify(r.Context(), raw)
+	if err != nil {
+		return nil, nil, false
+	}
+
+	claims := &oidc.Claims{}
+	if err := idToken.Claims(claims); err != nil {
+		return nil, nil, false
+	}
+	if claims.Sub == "" {
+		return nil, nil, false
+	}
+
+	var emailPtr *string
+	if claims.Email != "" {
+		e := claims.Email
+		emailPtr = &e
+	}
+	if _, err := a.users.EnsureBySub(r.Context(), claims.Sub, emailPtr); err != nil {
+		return nil, nil, false
+	}
+
+	// OIDC bearer obtiene permisos completos de sesión web.
+	return claims, []string{"*"}, true
 }
 
 func (a *Auth) tryRefresh(w http.ResponseWriter, r *http.Request) (*oidc.Claims, error) {
