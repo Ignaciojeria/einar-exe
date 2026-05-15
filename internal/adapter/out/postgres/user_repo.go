@@ -52,6 +52,18 @@ func (r *userRepo) FindBySub(ctx context.Context, sub string) (*domain.User, err
 	return u, err
 }
 
+func (r *userRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
+	const q = `
+		SELECT id, tenant_id, casdoor_sub, email, role, created_at, updated_at
+		FROM users WHERE id = $1
+	`
+	u, err := r.scanOne(ctx, q, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	return u, err
+}
+
 // AssignTenant: setea tenant_id + role. Si el user ya pertenece a otro
 // tenant (tenant_id IS NOT NULL y distinto), devuelve ErrConflict.
 // El "Slack workspaces multi-membership" se decide implementar más tarde.

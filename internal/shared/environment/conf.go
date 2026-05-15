@@ -19,12 +19,14 @@ type Conf struct {
 	// ------------------------------------------------------------
 	// App
 	// ------------------------------------------------------------
-	APP_ENV        string `env:"APP_ENV"        envDefault:"development"` // development | staging | production
-	APP_PORT       string `env:"APP_PORT"       envDefault:"8080"`
-	APP_PUBLIC_URL string `env:"APP_PUBLIC_URL" envDefault:"http://localhost:8080"`
-	LOG_LEVEL      string `env:"LOG_LEVEL"      envDefault:"info"` // debug | info | warn | error
-	PROJECT_NAME   string `env:"PROJECT_NAME"   envDefault:"einar-exe"`
-	VERSION        string `env:"VERSION"`
+	APP_ENV              string `env:"APP_ENV"        envDefault:"development"` // development | staging | production
+	APP_PORT             string `env:"APP_PORT"       envDefault:"8080"`
+	APP_PUBLIC_URL       string `env:"APP_PUBLIC_URL" envDefault:"http://localhost:8080"`
+	LOG_LEVEL            string `env:"LOG_LEVEL"      envDefault:"info"` // debug | info | warn | error
+	PROJECT_NAME         string `env:"PROJECT_NAME"   envDefault:"einar-exe"`
+	VERSION              string `env:"VERSION"`
+	PROJECTS_BASE_DIR    string `env:"PROJECTS_BASE_DIR"    envDefault:"projects"`
+	PROJECTS_BASE_DOMAIN string `env:"PROJECTS_BASE_DOMAIN"`
 
 	// ------------------------------------------------------------
 	// Backing service: Postgres

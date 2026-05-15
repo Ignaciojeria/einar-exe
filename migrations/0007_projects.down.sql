@@ -1,0 +1,5 @@
+SET ROLE einar;
+
+DROP TABLE IF EXISTS projects;
+
+RESET ROLE;

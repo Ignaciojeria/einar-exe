@@ -105,6 +105,9 @@ type UserRepo interface {
 	// FindBySub devuelve el user o ErrNotFound.
 	FindBySub(ctx context.Context, sub string) (*User, error)
 
+	// FindByID devuelve el user o ErrNotFound.
+	FindByID(ctx context.Context, id uuid.UUID) (*User, error)
+
 	// AssignTenant asocia un user con un tenant y un rol.
 	// Falla con ErrConflict si el user ya tiene tenant distinto.
 	AssignTenant(ctx context.Context, userID, tenantID uuid.UUID, role Role) error

@@ -47,3 +47,6 @@ web/src/routeTree.gen.ts
 # Secretos montados (PEM, certs, etc.)
 secrets/
 casdoor/init_data.json
+
+# Runtime provisioning (proyectos creados por la app)
+projects/
