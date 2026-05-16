@@ -1,10 +1,12 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -195,6 +197,9 @@ type provisionVMResponse struct {
 }
 
 func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, subdomain string) (*provisionVMResponse, error) {
+	if strings.TrimSpace(env.EXE_API_TOKEN) != "" {
+		return provisionProjectVMByHTTP(ctx, env, slug, subdomain)
+	}
 	target := strings.TrimSpace(env.VM_PROVISION_SSH_TARGET)
 	if target == "" {
 		return nil, nil
@@ -219,6 +224,43 @@ func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, su
 	if err != nil {
 		return nil, fmt.Errorf("provisioner command failed: %w | output: %s", err, strings.TrimSpace(string(raw)))
 	}
+	return parseProvisionVMResponse(raw)
+}
+
+func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, subdomain string) (*provisionVMResponse, error) {
+	timeoutSec := env.VM_PROVISION_TIMEOUT_SEC
+	if timeoutSec <= 0 {
+		timeoutSec = 90
+	}
+	pctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	endpoint := strings.TrimSpace(env.EXE_API_URL)
+	if endpoint == "" {
+		endpoint = "https://exe.dev/exec"
+	}
+	command := fmt.Sprintf("new --name=%s --domain=%s --json", slug, subdomain)
+	req, err := http.NewRequestWithContext(pctx, http.MethodPost, endpoint, bytes.NewBufferString(command))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(env.EXE_API_TOKEN))
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("provisioner http failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return parseProvisionVMResponse(raw)
+}
+
+func parseProvisionVMResponse(raw []byte) (*provisionVMResponse, error) {
 	var out provisionVMResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("parse provisioner response: %w", err)

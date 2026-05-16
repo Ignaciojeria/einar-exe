@@ -39,6 +39,10 @@ type Conf struct {
 	VM_PROVISION_CREATE_CMD string `env:"VM_PROVISION_CREATE_CMD" envDefault:"new"`
 	VM_PROVISION_TIMEOUT_SEC int    `env:"VM_PROVISION_TIMEOUT_SEC" envDefault:"90"`
 
+	// Provisioner HTTP API opcional (preferido sobre SSH si hay token).
+	EXE_API_URL   string `env:"EXE_API_URL" envDefault:"https://exe.dev/exec"`
+	EXE_API_TOKEN string `env:"EXE_API_TOKEN"`
+
 	// ------------------------------------------------------------
 	// Backing service: Postgres
 	// ------------------------------------------------------------
