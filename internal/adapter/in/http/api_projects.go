@@ -239,7 +239,7 @@ func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, s
 	if endpoint == "" {
 		endpoint = "https://exe.dev/exec"
 	}
-	command := fmt.Sprintf("new --name=%s --domain=%s --json", slug, subdomain)
+	command := fmt.Sprintf("new --name=%s --json", slug)
 	req, err := http.NewRequestWithContext(pctx, http.MethodPost, endpoint, bytes.NewBufferString(command))
 	if err != nil {
 		return nil, err

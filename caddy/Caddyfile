@@ -65,6 +65,7 @@
         path /api/embedded-token
         path /api/credentials
         path /api/tenants*
+        path /api/projects*
         # Endpoints públicos para validación third-party (sin cookie):
         path /whoami           # introspect de un einar JWT
         path /.well-known/einar/*  # JWKS y discovery del signer einar
