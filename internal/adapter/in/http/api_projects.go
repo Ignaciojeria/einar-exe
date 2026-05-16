@@ -150,9 +150,12 @@ func apiProjectsHandler(
 		if vmInfo != nil {
 			resp.VMName = vmInfo.VMName
 			resp.VMHTTPSURL = vmInfo.HTTPSURL
-			resp.VMSshDest = vmInfo.SSHDest
+			resp.VMSshDest = normalizeMutagenDestination(vmInfo.SSHDest, env, p.Path)
 			resp.VMSshPrivateKey = vmInfo.SSHPrivateKey
 			resp.ProjectAPIToken = vmInfo.APIToken
+			if strings.TrimSpace(resp.MutagenDestination) == "" {
+				resp.MutagenDestination = resp.VMSshDest
+			}
 		}
 		return resp, nil
 	})
@@ -276,6 +279,27 @@ func parseProvisionVMResponse(raw []byte) (*provisionVMResponse, error) {
 		return nil, fmt.Errorf("provisioner response missing vm_name")
 	}
 	return &out, nil
+}
+
+func normalizeMutagenDestination(raw string, env environment.Conf, projectPath string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "://") {
+		// Si ya viene como ssh:// o docker:// lo respetamos.
+		return value
+	}
+
+	user := strings.TrimSpace(env.PROJECTS_SYNC_SSH_USER)
+	if user == "" {
+		user = "root"
+	}
+	port := strings.TrimSpace(env.PROJECTS_SYNC_SSH_PORT)
+	if port == "" || port == "22" {
+		return fmt.Sprintf("ssh://%s@%s%s", user, value, projectPath)
+	}
+	return fmt.Sprintf("ssh://%s@%s:%s%s", user, value, port, projectPath)
 }
 
 func buildMutagenDestination(env environment.Conf, projectPath string) string {
