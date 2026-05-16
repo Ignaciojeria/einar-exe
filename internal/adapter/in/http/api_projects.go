@@ -1,15 +1,19 @@
 package http
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"einar-exe/internal/domain"
 	"einar-exe/internal/middleware"
@@ -26,12 +30,19 @@ type ProjectCreateRequest struct {
 }
 
 type ProjectCreateResponse struct {
-	ProjectID string `json:"projectId"`
-	Name      string `json:"name"`
-	Slug      string `json:"slug"`
-	Path      string `json:"path"`
-	Subdomain string `json:"subdomain"`
-	Status    string `json:"status"`
+	ProjectID          string `json:"projectId"`
+	Name               string `json:"name"`
+	Slug               string `json:"slug"`
+	Path               string `json:"path"`
+	Subdomain          string `json:"subdomain"`
+	Status             string `json:"status"`
+	MutagenDestination string `json:"mutagenDestination,omitempty"`
+	MutagenSessionName string `json:"mutagenSessionName,omitempty"`
+	VMName             string `json:"vmName,omitempty"`
+	VMHTTPSURL         string `json:"vmHttpsUrl,omitempty"`
+	VMSshDest          string `json:"vmSshDest,omitempty"`
+	VMSshPrivateKey    string `json:"vmSshPrivateKey,omitempty"`
+	ProjectAPIToken    string `json:"projectApiToken,omitempty"`
 }
 
 func apiProjectsHandler(
@@ -101,7 +112,18 @@ func apiProjectsHandler(
 			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not scaffold project", Detail: err.Error()}
 		}
 
-		p, err := projects.Create(c.Context(), tenant.ID, name, slug, projectPath, subdomain, "ready")
+		vmInfo, err := maybeProvisionProjectVM(c.Context(), env, slug, subdomain)
+		if err != nil {
+			_ = os.RemoveAll(projectPath)
+			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusBadGateway, Title: "could not provision project vm", Detail: err.Error()}
+		}
+
+		status := "ready"
+		if vmInfo != nil && strings.TrimSpace(vmInfo.Status) != "" {
+			status = strings.TrimSpace(vmInfo.Status)
+		}
+
+		p, err := projects.Create(c.Context(), tenant.ID, name, slug, projectPath, subdomain, status)
 		if err != nil {
 			_ = os.RemoveAll(projectPath)
 			if errors.Is(err, domain.ErrConflict) {
@@ -113,14 +135,24 @@ func apiProjectsHandler(
 			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not create project", Detail: err.Error()}
 		}
 
-		return ProjectCreateResponse{
-			ProjectID: p.ID.String(),
-			Name:      p.Name,
-			Slug:      p.Slug,
-			Path:      p.Path,
-			Subdomain: p.Subdomain,
-			Status:    p.Status,
-		}, nil
+		resp := ProjectCreateResponse{
+			ProjectID:          p.ID.String(),
+			Name:               p.Name,
+			Slug:               p.Slug,
+			Path:               p.Path,
+			Subdomain:          p.Subdomain,
+			Status:             p.Status,
+			MutagenDestination: buildMutagenDestination(env, p.Path),
+			MutagenSessionName: p.Slug,
+		}
+		if vmInfo != nil {
+			resp.VMName = vmInfo.VMName
+			resp.VMHTTPSURL = vmInfo.HTTPSURL
+			resp.VMSshDest = vmInfo.SSHDest
+			resp.VMSshPrivateKey = vmInfo.SSHPrivateKey
+			resp.ProjectAPIToken = vmInfo.APIToken
+		}
+		return resp, nil
 	})
 }
 
@@ -151,6 +183,63 @@ func safeProjectPath(baseDir, slug string) (string, error) {
 		return "", errors.New("path traversal detected")
 	}
 	return projectPath, nil
+}
+
+type provisionVMResponse struct {
+	VMName       string `json:"vm_name"`
+	HTTPSURL     string `json:"https_url"`
+	SSHDest      string `json:"ssh_dest"`
+	Status       string `json:"status"`
+	SSHPrivateKey string `json:"ssh_private_key"`
+	APIToken     string `json:"api_token"`
+}
+
+func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, subdomain string) (*provisionVMResponse, error) {
+	target := strings.TrimSpace(env.VM_PROVISION_SSH_TARGET)
+	if target == "" {
+		return nil, nil
+	}
+	createCmd := strings.TrimSpace(env.VM_PROVISION_CREATE_CMD)
+	if createCmd == "" {
+		createCmd = "new"
+	}
+	timeoutSec := env.VM_PROVISION_TIMEOUT_SEC
+	if timeoutSec <= 0 {
+		timeoutSec = 90
+	}
+	pctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(pctx, "ssh", target, createCmd,
+		"--name", slug,
+		"--domain", subdomain,
+		"--json",
+	)
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var out provisionVMResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse provisioner response: %w", err)
+	}
+	if strings.TrimSpace(out.Status) == "" {
+		out.Status = "ready"
+	}
+	return &out, nil
+}
+
+func buildMutagenDestination(env environment.Conf, projectPath string) string {
+	host := strings.TrimSpace(env.PROJECTS_SYNC_SSH_HOST)
+	user := strings.TrimSpace(env.PROJECTS_SYNC_SSH_USER)
+	if host == "" || user == "" {
+		return ""
+	}
+	port := strings.TrimSpace(env.PROJECTS_SYNC_SSH_PORT)
+	if port == "" || port == "22" {
+		return fmt.Sprintf("ssh://%s@%s%s", user, host, projectPath)
+	}
+	return fmt.Sprintf("ssh://%s@%s:%s%s", user, host, port, projectPath)
 }
 
 func baseDomain(env environment.Conf) string {

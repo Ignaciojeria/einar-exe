@@ -27,6 +27,17 @@ type Conf struct {
 	VERSION              string `env:"VERSION"`
 	PROJECTS_BASE_DIR    string `env:"PROJECTS_BASE_DIR"    envDefault:"projects"`
 	PROJECTS_BASE_DOMAIN string `env:"PROJECTS_BASE_DOMAIN"`
+	// Config opcional para sugerir endpoint de sync (Mutagen SSH) al CLI.
+	// Si se define host+user, /api/projects responderá `mutagenDestination`.
+	PROJECTS_SYNC_SSH_HOST string `env:"PROJECTS_SYNC_SSH_HOST"`
+	PROJECTS_SYNC_SSH_USER string `env:"PROJECTS_SYNC_SSH_USER"`
+	PROJECTS_SYNC_SSH_PORT string `env:"PROJECTS_SYNC_SSH_PORT" envDefault:"22"`
+
+	// Provisioner opcional para crear VM aislada por proyecto (MVP).
+	// Si VM_PROVISION_SSH_TARGET está vacío, /api/projects mantiene modo local.
+	VM_PROVISION_SSH_TARGET string `env:"VM_PROVISION_SSH_TARGET"`
+	VM_PROVISION_CREATE_CMD string `env:"VM_PROVISION_CREATE_CMD" envDefault:"new"`
+	VM_PROVISION_TIMEOUT_SEC int    `env:"VM_PROVISION_TIMEOUT_SEC" envDefault:"90"`
 
 	// ------------------------------------------------------------
 	// Backing service: Postgres
