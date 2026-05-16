@@ -215,9 +215,9 @@ func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, su
 		"--domain", subdomain,
 		"--json",
 	)
-	raw, err := cmd.Output()
+	raw, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("provisioner command failed: %w | output: %s", err, strings.TrimSpace(string(raw)))
 	}
 	var out provisionVMResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -225,6 +225,13 @@ func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, su
 	}
 	if strings.TrimSpace(out.Status) == "" {
 		out.Status = "ready"
+	}
+	status := strings.ToLower(strings.TrimSpace(out.Status))
+	if status == "error" || status == "failed" {
+		return nil, fmt.Errorf("provisioner returned status=%q", out.Status)
+	}
+	if strings.TrimSpace(out.VMName) == "" {
+		return nil, fmt.Errorf("provisioner response missing vm_name")
 	}
 	return &out, nil
 }
