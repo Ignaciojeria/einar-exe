@@ -28,7 +28,9 @@ import (
 var _ = ioc.Register(apiProjectsHandler)
 
 type ProjectCreateRequest struct {
-	Name string `json:"name"`
+	Name       string `json:"name"`
+	Public     bool   `json:"public"`
+	Visibility string `json:"visibility"`
 }
 
 type ProjectCreateResponse struct {
@@ -114,7 +116,8 @@ func apiProjectsHandler(
 			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not scaffold project", Detail: err.Error()}
 		}
 
-		vmInfo, err := maybeProvisionProjectVM(c.Context(), env, slug, subdomain)
+		isPublic := body.Public || strings.ToLower(strings.TrimSpace(body.Visibility)) == "public"
+		vmInfo, err := maybeProvisionProjectVM(c.Context(), env, slug, subdomain, isPublic)
 		if err != nil {
 			_ = os.RemoveAll(projectPath)
 			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusBadGateway, Title: "could not provision project vm", Detail: err.Error()}
@@ -199,9 +202,9 @@ type provisionVMResponse struct {
 	APIToken     string `json:"api_token"`
 }
 
-func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, subdomain string) (*provisionVMResponse, error) {
+func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, subdomain string, public bool) (*provisionVMResponse, error) {
 	if strings.TrimSpace(env.EXE_API_TOKEN) != "" {
-		return provisionProjectVMByHTTP(ctx, env, slug, subdomain)
+		return provisionProjectVMByHTTP(ctx, env, slug, subdomain, public)
 	}
 	target := strings.TrimSpace(env.VM_PROVISION_SSH_TARGET)
 	if target == "" {
@@ -230,7 +233,7 @@ func maybeProvisionProjectVM(ctx context.Context, env environment.Conf, slug, su
 	return parseProvisionVMResponse(raw)
 }
 
-func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, subdomain string) (*provisionVMResponse, error) {
+func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, subdomain string, public bool) (*provisionVMResponse, error) {
 	timeoutSec := env.VM_PROVISION_TIMEOUT_SEC
 	if timeoutSec <= 0 {
 		timeoutSec = 90
@@ -247,7 +250,8 @@ func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, s
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(env.EXE_API_TOKEN))
+	apiToken := strings.TrimSpace(env.EXE_API_TOKEN)
+	req.Header.Set("Authorization", "Bearer "+apiToken)
 	req.Header.Set("Content-Type", "text/plain")
 
 	resp, err := (&http.Client{}).Do(req)
@@ -260,7 +264,37 @@ func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, s
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("provisioner http failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	return parseProvisionVMResponse(raw)
+
+	result, err := parseProvisionVMResponse(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	if public && result.VMName != "" {
+		_ = exeAPIPost(pctx, endpoint, apiToken, fmt.Sprintf("share set-public %s", result.VMName))
+		_ = exeAPIPost(pctx, endpoint, apiToken, fmt.Sprintf("share port %s 8000", result.VMName))
+	}
+
+	return result, nil
+}
+
+func exeAPIPost(ctx context.Context, endpoint, token, command string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(command))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "text/plain")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("exe api %q: status %d", command, resp.StatusCode)
+	}
+	return nil
 }
 
 func parseProvisionVMResponse(raw []byte) (*provisionVMResponse, error) {
