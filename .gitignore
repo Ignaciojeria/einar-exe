@@ -50,3 +50,6 @@ casdoor/init_data.json
 
 # Runtime provisioning (proyectos creados por la app)
 projects/
+
+# Caddy env (basic auth hashes)
+caddy/caddy.env

@@ -49,7 +49,11 @@
 
     # ── PGWEB bajo /pgweb/* ─────────────────────────────────────────
     # Web UI para inspeccionar PostgreSQL. pgweb escucha en :8081.
+    # Protegido con basic auth — credenciales en PGWEB_* del .env.
     handle_path /pgweb/* {
+        basic_auth {
+            {$PGWEB_USER:admin} {$PGWEB_HASH}
+        }
         reverse_proxy pgweb:8081
     }
     handle /pgweb {
