@@ -158,6 +158,18 @@ services:
     restart: unless-stopped
 
 
+  # ── pgweb (Web UI para PostgreSQL) ──────────────────────────────
+  # Accesible vía Caddy en /pgweb/*. Conecta al Postgres del stack
+  # como superuser para inspección completa.
+  pgweb:
+    image: sosedoff/pgweb:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGWEB_DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${EINAR_DB_NAME}?sslmode=disable
+    restart: unless-stopped
+
   openobserve:
     image: public.ecr.aws/zinclabs/openobserve:latest
     # Sin ports: solo accesible vía Caddy en /o2/* (ruta pública con

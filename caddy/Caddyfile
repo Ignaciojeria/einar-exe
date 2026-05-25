@@ -47,6 +47,15 @@
         redir /o2/ permanent
     }
 
+    # ── PGWEB bajo /pgweb/* ─────────────────────────────────────────
+    # Web UI para inspeccionar PostgreSQL. pgweb escucha en :8081.
+    handle_path /pgweb/* {
+        reverse_proxy pgweb:8081
+    }
+    handle /pgweb {
+        redir /pgweb/ permanent
+    }
+
     # ── APP Go: rutas conocidas ───────────────────────────────────────
     @app {
         # Shell SPA (React)
