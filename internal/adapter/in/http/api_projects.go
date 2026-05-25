@@ -3,6 +3,8 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/Ignaciojeria/ioc"
 	"github.com/go-fuego/fuego"
+	"github.com/google/uuid"
 )
 
 var _ = ioc.Register(apiProjectsHandler)
@@ -47,6 +50,12 @@ type ProjectCreateResponse struct {
 	VMSshDest          string `json:"vmSshDest,omitempty"`
 	VMSshPrivateKey    string `json:"vmSshPrivateKey,omitempty"`
 	ProjectAPIToken    string `json:"projectApiToken,omitempty"`
+	// Credenciales de la DB aislada del proyecto
+	DBName     string `json:"dbName,omitempty"`
+	DBUser     string `json:"dbUser,omitempty"`
+	DBPassword string `json:"dbPassword,omitempty"`
+	DBHost     string `json:"dbHost,omitempty"`
+	DBPort     string `json:"dbPort,omitempty"`
 }
 
 func apiProjectsHandler(
@@ -128,7 +137,15 @@ func apiProjectsHandler(
 			status = strings.TrimSpace(vmInfo.Status)
 		}
 
-		p, err := projects.Create(c.Context(), tenant.ID, name, slug, projectPath, subdomain, status)
+		// Generar credenciales de DB aislada para el proyecto.
+		// user = slug_shortid (max 63 chars, Postgres limit)
+		// password = UUID v4
+		shortID := generateShortID()
+		dbUser := sanitizeDBIdent(fmt.Sprintf("%s_%s", slug, shortID))
+		dbPassword := uuid.New().String()
+		dbName := dbUser // misma convención: db_name == db_user
+
+		p, err := projects.Create(c.Context(), tenant.ID, name, slug, projectPath, subdomain, status, dbName, dbUser, dbPassword)
 		if err != nil {
 			_ = os.RemoveAll(projectPath)
 			if errors.Is(err, domain.ErrConflict) {
@@ -147,6 +164,11 @@ func apiProjectsHandler(
 			Path:               p.Path,
 			Subdomain:          p.Subdomain,
 			Status:             p.Status,
+			DBName:             p.DBName,
+			DBUser:             p.DBUser,
+			DBPassword:         p.DBPassword,
+			DBHost:             "db",
+			DBPort:             "5432",
 			MutagenDestination: buildMutagenDestination(env, p.Path),
 			MutagenSessionName: p.Slug,
 		}
@@ -392,4 +414,27 @@ func isReservedSlug(slug string) bool {
 	}
 	_, exists := reserved[slug]
 	return exists
+}
+
+// generateShortID genera un ID corto hex de 4 bytes (8 chars).
+func generateShortID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// sanitizeDBIdent limpia un nombre para usarse como identifier de Postgres.
+// Solo permite [a-z0-9_], trunca a 63 chars (límite de Postgres).
+func sanitizeDBIdent(s string) string {
+	var b strings.Builder
+	for _, c := range strings.ToLower(s) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			b.WriteRune(c)
+		}
+	}
+	result := b.String()
+	if len(result) > 63 {
+		result = result[:63]
+	}
+	return result
 }
