@@ -202,6 +202,22 @@ func quoteLiteral(s string) string {
 	return "'" + escaped + "'"
 }
 
+func (r *projectRepo) FindBySlugAndTenant(
+	ctx context.Context,
+	slug string,
+	tenantID uuid.UUID,
+) (*domain.Project, error) {
+	q := `SELECT ` + projectCols + ` FROM projects WHERE slug = $1 AND tenant_id = $2`
+	p, err := scanProject(r.pool.QueryRow(ctx, q, slug, tenantID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrNotFound
+		}
+		return nil, fmt.Errorf("find project by slug: %w", err)
+	}
+	return p, nil
+}
+
 func envOrDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

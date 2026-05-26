@@ -26,4 +26,5 @@ type Project struct {
 // ProjectRepo define persistencia para proyectos aprovisionados.
 type ProjectRepo interface {
 	Create(ctx context.Context, tenantID uuid.UUID, name, slug, path, subdomain, status, dbName, dbUser, dbPassword string) (*Project, error)
+	FindBySlugAndTenant(ctx context.Context, slug string, tenantID uuid.UUID) (*Project, error)
 }
