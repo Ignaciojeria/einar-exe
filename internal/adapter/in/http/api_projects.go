@@ -36,27 +36,9 @@ type ProjectCreateRequest struct {
 	Visibility string `json:"visibility"`
 }
 
-type ProjectCreateResponse struct {
-	ProjectID          string `json:"projectId"`
-	Name               string `json:"name"`
-	Slug               string `json:"slug"`
-	Path               string `json:"path"`
-	Subdomain          string `json:"subdomain"`
-	Status             string `json:"status"`
-	MutagenDestination string `json:"mutagenDestination,omitempty"`
-	MutagenSessionName string `json:"mutagenSessionName,omitempty"`
-	VMName             string `json:"vmName,omitempty"`
-	VMHTTPSURL         string `json:"vmHttpsUrl,omitempty"`
-	VMSshDest          string `json:"vmSshDest,omitempty"`
-	VMSshPrivateKey    string `json:"vmSshPrivateKey,omitempty"`
-	ProjectAPIToken    string `json:"projectApiToken,omitempty"`
-	// Credenciales de la DB aislada del proyecto
-	DBName     string `json:"dbName,omitempty"`
-	DBUser     string `json:"dbUser,omitempty"`
-	DBPassword string `json:"dbPassword,omitempty"`
-	DBHost     string `json:"dbHost,omitempty"`
-	DBPort     string `json:"dbPort,omitempty"`
-}
+// ProjectCreateResponse = ProjectRuntimeConfig canónico.
+// Es el único contrato entre backend y CLI/frontend.
+type ProjectCreateResponse = domain.ProjectRuntimeConfig
 
 func apiProjectsHandler(
 	api *APIGroup,
@@ -157,43 +139,129 @@ func apiProjectsHandler(
 			return ProjectCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not create project", Detail: err.Error()}
 		}
 
-		resp := ProjectCreateResponse{
-			ProjectID:          p.ID.String(),
-			Name:               p.Name,
-			Slug:               p.Slug,
-			Path:               p.Path,
-			Subdomain:          p.Subdomain,
-			Status:             p.Status,
-			DBName:             p.DBName,
-			DBUser:             p.DBUser,
-			DBPassword:         p.DBPassword,
-			DBHost:             "db",
-			DBPort:             "5432",
-			MutagenDestination: buildMutagenDestination(env, p.Path),
-			MutagenSessionName: p.Slug,
+		// ── Construir ProjectRuntimeConfig canónico ────────────────
+		secretsBasePath := fmt.Sprintf("projects/%s", p.Slug)
+
+		rc := domain.ProjectRuntimeConfig{
+			Version:   1,
+			ProjectID: p.ID.String(),
+			Slug:      p.Slug,
+			Workspace: domain.RuntimeWorkspace{
+				Branch: "main",
+				Mode:   "single-owner",
+			},
+			Metadata: domain.RuntimeMetadata{
+				OwnerUserID: user.CasdoorSub,
+				CreatedAt:   p.CreatedAt,
+				UpdatedAt:   p.UpdatedAt,
+			},
 		}
+
+		// VM info
 		if vmInfo != nil {
-			resp.VMName = vmInfo.VMName
-			resp.VMHTTPSURL = vmInfo.HTTPSURL
-			resp.VMSshDest = normalizeMutagenDestination(vmInfo.SSHDest, env, p.Path)
-			resp.VMSshPrivateKey = vmInfo.SSHPrivateKey
-			resp.ProjectAPIToken = vmInfo.APIToken
-			if strings.TrimSpace(resp.MutagenDestination) == "" {
-				resp.MutagenDestination = resp.VMSshDest
+			remotePath := p.Path
+			sshDest := normalizeMutagenDestination(vmInfo.SSHDest, env, remotePath)
+
+			rc.VM = &domain.RuntimeVM{
+				Name:              vmInfo.VMName,
+				HTTPSURL:          vmInfo.HTTPSURL,
+				SSHDestination:    sshDest,
+				RemoteProjectPath: remotePath,
+			}
+
+			mutagenDest := buildMutagenDestination(env, remotePath)
+			if strings.TrimSpace(mutagenDest) == "" {
+				mutagenDest = sshDest
+			}
+			rc.Sync = &domain.RuntimeSync{
+				Provider:    "mutagen",
+				Destination: mutagenDest,
+				SessionName: p.Slug,
+				IgnoreVCS:   true,
+			}
+
+			rc.Secrets = &domain.RuntimeSecrets{}
+			if vmInfo.APIToken != "" {
+				rc.Secrets.ProjectAPITokenSecretRef = secretsBasePath + "/api/token"
+			}
+			if vmInfo.SSHPrivateKey != "" {
+				rc.Secrets.SSHPrivateKeySecretRef = secretsBasePath + "/ssh/private-key"
 			}
 		}
-		return resp, nil
+
+		// Database info
+		if p.DBName != "" {
+			rc.Database = &domain.RuntimeDatabase{
+				Name:              p.DBName,
+				User:              p.DBUser,
+				Host:              "db",
+				Port:              5432,
+				PasswordSecretRef: secretsBasePath + "/db/password",
+			}
+			if rc.Secrets == nil {
+				rc.Secrets = &domain.RuntimeSecrets{}
+			}
+			rc.Secrets.DBPasswordSecretRef = secretsBasePath + "/db/password"
+		}
+
+		// Persistir runtime.json en el directorio del proyecto
+		if err := writeRuntimeConfig(projectPath, rc); err != nil {
+			// No es fatal: el proyecto ya existe en DB. Logueamos y seguimos.
+			fmt.Fprintf(os.Stderr, "WARN: could not write runtime.json: %v\n", err)
+		}
+
+		// Persistir secretos reales en archivos locales (el scaffold
+		// los necesita para que el proyecto hijo pueda leerlos).
+		writeProjectSecrets(projectPath, p.DBPassword, vmInfo)
+
+		return rc, nil
 	})
+}
+
+// writeRuntimeConfig persiste el ProjectRuntimeConfig como runtime.json
+// en el directorio del proyecto. Es la fuente de verdad local.
+func writeRuntimeConfig(projectPath string, rc domain.ProjectRuntimeConfig) error {
+	data, err := json.MarshalIndent(rc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal runtime config: %w", err)
+	}
+	return os.WriteFile(filepath.Join(projectPath, "runtime.json"), data, 0o600)
+}
+
+// writeProjectSecrets escribe los valores reales de secretos en archivos
+// dentro de secrets/ del proyecto. Estos archivos están en .gitignore.
+func writeProjectSecrets(projectPath, dbPassword string, vmInfo *provisionVMResponse) {
+	secretsDir := filepath.Join(projectPath, "secrets")
+	_ = os.MkdirAll(secretsDir, 0o700)
+
+	if dbPassword != "" {
+		_ = os.WriteFile(filepath.Join(secretsDir, "db-password"), []byte(dbPassword), 0o600)
+	}
+	if vmInfo != nil {
+		if vmInfo.APIToken != "" {
+			_ = os.WriteFile(filepath.Join(secretsDir, "api-token"), []byte(vmInfo.APIToken), 0o600)
+		}
+		if vmInfo.SSHPrivateKey != "" {
+			_ = os.WriteFile(filepath.Join(secretsDir, "ssh-private-key"), []byte(vmInfo.SSHPrivateKey), 0o600)
+		}
+	}
 }
 
 func scaffoldProject(projectPath, name, slug string) error {
 	if err := os.MkdirAll(filepath.Join(projectPath, "src"), 0o755); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(projectPath, "secrets"), 0o700); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(projectPath, "README.md"), []byte("# "+name+"\n\nProject slug: `"+slug+"`\n"), 0o644); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(projectPath, ".env"), []byte("PROJECT_SLUG="+slug+"\n"), 0o600); err != nil {
+		return err
+	}
+	gitignore := "secrets/\nruntime.json\n.env\n"
+	if err := os.WriteFile(filepath.Join(projectPath, ".gitignore"), []byte(gitignore), 0o644); err != nil {
 		return err
 	}
 	return nil
