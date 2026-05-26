@@ -157,11 +157,11 @@ func apiProjectsHandler(
 			},
 		}
 
-		// VM info
-		if vmInfo != nil {
-			remotePath := p.Path
-			sshDest := normalizeMutagenDestination(vmInfo.SSHDest, env, remotePath)
+		// VM + Sync info
+		sshDest := buildSSHDestination(env, p.Slug)
+		remotePath := remoteProjectPath(env, p.Slug)
 
+		if vmInfo != nil {
 			rc.VM = &domain.RuntimeVM{
 				Name:              vmInfo.VMName,
 				HTTPSURL:          vmInfo.HTTPSURL,
@@ -169,13 +169,9 @@ func apiProjectsHandler(
 				RemoteProjectPath: remotePath,
 			}
 
-			mutagenDest := buildMutagenDestination(env, remotePath)
-			if strings.TrimSpace(mutagenDest) == "" {
-				mutagenDest = sshDest
-			}
 			rc.Sync = &domain.RuntimeSync{
 				Provider:    "mutagen",
-				Destination: mutagenDest,
+				Destination: sshDest,
 				SessionName: p.Slug,
 				IgnoreVCS:   true,
 			}
@@ -186,6 +182,20 @@ func apiProjectsHandler(
 			}
 			if vmInfo.SSHPrivateKey != "" {
 				rc.Secrets.SSHPrivateKeySecretRef = secretsBasePath + "/ssh/private-key"
+			}
+		} else if sshDest != "" {
+			// Sin VM provisioner pero con dominio configurado
+			rc.VM = &domain.RuntimeVM{
+				Name:              p.Slug,
+				HTTPSURL:          fmt.Sprintf("https://%s", p.Subdomain),
+				SSHDestination:    sshDest,
+				RemoteProjectPath: remotePath,
+			}
+			rc.Sync = &domain.RuntimeSync{
+				Provider:    "mutagen",
+				Destination: sshDest,
+				SessionName: p.Slug,
+				IgnoreVCS:   true,
 			}
 		}
 
@@ -405,38 +415,31 @@ func parseProvisionVMResponse(raw []byte) (*provisionVMResponse, error) {
 	return &out, nil
 }
 
-func normalizeMutagenDestination(raw string, env environment.Conf, projectPath string) string {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return ""
+// remoteProjectPath calcula el path remoto del proyecto en la VM
+// usando el template configurable (default: /home/exedev/workspace/{slug}).
+func remoteProjectPath(env environment.Conf, slug string) string {
+	tpl := strings.TrimSpace(env.PROJECTS_REMOTE_PATH_TEMPLATE)
+	if tpl == "" {
+		tpl = "/home/exedev/workspace/{slug}"
 	}
-	if strings.Contains(value, "://") {
-		// Si ya viene como ssh:// o docker:// lo respetamos.
-		return value
-	}
-
-	user := strings.TrimSpace(env.PROJECTS_SYNC_SSH_USER)
-	if user == "" {
-		user = "root"
-	}
-	port := strings.TrimSpace(env.PROJECTS_SYNC_SSH_PORT)
-	if port == "" || port == "22" {
-		return fmt.Sprintf("ssh://%s@%s%s", user, value, projectPath)
-	}
-	return fmt.Sprintf("ssh://%s@%s:%s%s", user, value, port, projectPath)
+	return strings.ReplaceAll(tpl, "{slug}", slug)
 }
 
-func buildMutagenDestination(env environment.Conf, projectPath string) string {
-	host := strings.TrimSpace(env.PROJECTS_SYNC_SSH_HOST)
-	user := strings.TrimSpace(env.PROJECTS_SYNC_SSH_USER)
-	if host == "" || user == "" {
+// buildSSHDestination construye el destino SSH canónico para un proyecto.
+// Formato: exedev@slug.exe.xyz:/home/exedev/workspace/slug
+// (SCP-style, que es lo que mutagen espera por defecto).
+func buildSSHDestination(env environment.Conf, slug string) string {
+	baseDom := baseDomain(env)
+	if baseDom == "" {
 		return ""
 	}
-	port := strings.TrimSpace(env.PROJECTS_SYNC_SSH_PORT)
-	if port == "" || port == "22" {
-		return fmt.Sprintf("ssh://%s@%s%s", user, host, projectPath)
+	host := fmt.Sprintf("%s.%s", slug, baseDom)
+	user := strings.TrimSpace(env.PROJECTS_SYNC_SSH_USER)
+	if user == "" {
+		user = "exedev"
 	}
-	return fmt.Sprintf("ssh://%s@%s:%s%s", user, host, port, projectPath)
+	remotePath := remoteProjectPath(env, slug)
+	return fmt.Sprintf("%s@%s:%s", user, host, remotePath)
 }
 
 func baseDomain(env environment.Conf) string {

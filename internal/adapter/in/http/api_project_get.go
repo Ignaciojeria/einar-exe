@@ -106,26 +106,21 @@ func buildPublicConfig(p *domain.Project, env environment.Conf) ProjectPublicCon
 		},
 	}
 
-	// VM info: reconstruir desde subdomain/path
-	if p.Subdomain != "" {
-		vmName := p.Slug
-		httpsURL := fmt.Sprintf("https://%s", p.Subdomain)
-		sshDest := normalizeMutagenDestination(p.Subdomain, env, p.Path)
+	// VM + Sync info
+	sshDest := buildSSHDestination(env, p.Slug)
+	remotePath := remoteProjectPath(env, p.Slug)
 
+	if sshDest != "" {
 		rc.VM = &domain.RuntimeVM{
-			Name:              vmName,
-			HTTPSURL:          httpsURL,
+			Name:              p.Slug,
+			HTTPSURL:          fmt.Sprintf("https://%s", p.Subdomain),
 			SSHDestination:    sshDest,
-			RemoteProjectPath: p.Path,
+			RemoteProjectPath: remotePath,
 		}
 
-		mutagenDest := buildMutagenDestination(env, p.Path)
-		if strings.TrimSpace(mutagenDest) == "" {
-			mutagenDest = sshDest
-		}
 		rc.Sync = &domain.RuntimeSync{
 			Provider:    "mutagen",
-			Destination: mutagenDest,
+			Destination: sshDest,
 			SessionName: p.Slug,
 			IgnoreVCS:   true,
 		}

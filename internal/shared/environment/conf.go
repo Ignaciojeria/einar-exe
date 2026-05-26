@@ -30,8 +30,11 @@ type Conf struct {
 	// Config opcional para sugerir endpoint de sync (Mutagen SSH) al CLI.
 	// Si se define host+user, /api/projects responderá `mutagenDestination`.
 	PROJECTS_SYNC_SSH_HOST string `env:"PROJECTS_SYNC_SSH_HOST"`
-	PROJECTS_SYNC_SSH_USER string `env:"PROJECTS_SYNC_SSH_USER"`
+	PROJECTS_SYNC_SSH_USER string `env:"PROJECTS_SYNC_SSH_USER" envDefault:"exedev"`
 	PROJECTS_SYNC_SSH_PORT string `env:"PROJECTS_SYNC_SSH_PORT" envDefault:"22"`
+	// Template para el path remoto del proyecto en la VM.
+	// {slug} se reemplaza por el slug del proyecto.
+	PROJECTS_REMOTE_PATH_TEMPLATE string `env:"PROJECTS_REMOTE_PATH_TEMPLATE" envDefault:"/home/exedev/workspace/{slug}"`
 
 	// Provisioner opcional para crear VM aislada por proyecto (MVP).
 	// Si VM_PROVISION_SSH_TARGET está vacío, /api/projects mantiene modo local.
@@ -49,6 +52,11 @@ type Conf struct {
 	// Cadena de conexión completa (twelve-factor IV — recurso enchufable).
 	// Cambiar de Postgres local a uno gestionado debe ser solo cambiar esta URL.
 	DATABASE_URL string `env:"DATABASE_URL,required"`
+
+	// Postgres superuser credentials for admin operations (CREATE ROLE, CREATE DATABASE).
+	// These should match the POSTGRES_USER and POSTGRES_PASSWORD from docker-compose.yml.
+	POSTGRES_USER     string `env:"POSTGRES_USER,required"`
+	POSTGRES_PASSWORD string `env:"POSTGRES_PASSWORD,required"`
 
 	// ------------------------------------------------------------
 	// Backing service: Casdoor (IAM)
