@@ -45,16 +45,17 @@ const (
 	RoleMember Role = "member"
 )
 
-// User = mapping local del identity a su tenant + rol.
-// Authentication is handled by exe.dev proxy headers.
+// User = mapping local del JWT subject a su tenant + rol.
+// El perfil completo (nombre, foto, email verificado) lo lee la app
+// del JWT, no de aquí.
 type User struct {
-	ID           uuid.UUID
-	TenantID     *uuid.UUID // NULL hasta que completa /signup
-	ExeDevUserID string     // X-ExeDev-UserID header (stable identifier)
-	Email        *string
-	Role         Role
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID         uuid.UUID
+	TenantID   *uuid.UUID // NULL hasta que completa /signup
+	CasdoorSub string     // claim `sub` del JWT (identificador estable)
+	Email      *string
+	Role       Role
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // HasTenant es shortcut para los handlers que deciden si redirigir
@@ -96,13 +97,13 @@ type TenantRepo interface {
 
 // UserRepo: persistencia de users.
 type UserRepo interface {
-	// EnsureByExeDevID crea o devuelve el user identificado por el
-	// X-ExeDev-UserID header. Idempotente. Email se actualiza si cambió.
+	// EnsureBySub crea o devuelve el user identificado por el sub
+	// del JWT. Idempotente. Email se actualiza si cambió.
 	// El tenant_id NO se asigna aquí (eso lo hace AssignTenant).
-	EnsureByExeDevID(ctx context.Context, exedevUserID string, email *string) (*User, error)
+	EnsureBySub(ctx context.Context, sub string, email *string) (*User, error)
 
-	// FindByExeDevID devuelve el user o ErrNotFound.
-	FindByExeDevID(ctx context.Context, exedevUserID string) (*User, error)
+	// FindBySub devuelve el user o ErrNotFound.
+	FindBySub(ctx context.Context, sub string) (*User, error)
 
 	// FindByID devuelve el user o ErrNotFound.
 	FindByID(ctx context.Context, id uuid.UUID) (*User, error)

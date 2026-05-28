@@ -21,6 +21,7 @@ services:
       - ./caddy/caddy.env
     depends_on:
       - app
+      - casdoor
     restart: unless-stopped
 
   app:
@@ -36,6 +37,8 @@ services:
       - .:/app
     depends_on:
       db:
+        condition: service_healthy
+      casdoor:
         condition: service_healthy
     # Sin environment block: el binario Go lee .env directamente via
     # godotenv (bind-mount en /app/.env). Esto evita doble-fuente y los
@@ -63,6 +66,43 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  casdoor:
+    # Imagen sin DB embebida (la all-in-one fuerza MariaDB local e ignora env vars).
+    # Verifica el último tag estable en https://hub.docker.com/r/casbin/casdoor
+    image: casbin/casdoor:v1.811.0
+    container_name: einar-casdoor
+    # Sin port mapping al host: Casdoor solo es accesible vía Caddy o
+    # via docker DNS desde otros contenedores (http://casdoor:8000).
+    # Si necesitas debugear su UI directamente, usa Caddy:
+    # https://einar.exe.xyz/login (Caddy lo pasa a casdoor:8000).
+    depends_on:
+      db:
+        condition: service_healthy
+    # init_data.json se renderiza en el host por scripts/setup.sh
+    # (envsubst-like sobre casdoor/init_data.json.tpl) y se monta
+    # read-only. Casdoor lo lee desde su WORKDIR (/) al arrancar y
+    # crea cualquier objeto declarado que aún no exista en la DB.
+    volumes:
+      - ./casdoor/init_data.json:/init_data.json:ro
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      # Backend storage (Postgres compartido, database lógica `casdoor`)
+      driverName: ${CASDOOR_DRIVER}
+      # Casdoor parsea dbname del propio dataSourceName: concatenamos al final.
+      dataSourceName: "${CASDOOR_DATA_SOURCE}${CASDOOR_DB_NAME}"
+      dbName: ${CASDOOR_DB_NAME}
+      # HTTP
+      httpport: "8000"
+      origin: ${CASDOOR_ORIGIN}
+      origin_frontend: ${CASDOOR_ORIGIN_FRONTEND}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
 
   # Migraciones SQL (proceso one-off, factor XII).
   # Corre como `postgres` (superuser) para poder crear extensiones;

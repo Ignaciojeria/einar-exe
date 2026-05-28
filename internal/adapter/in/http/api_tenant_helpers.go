@@ -25,15 +25,15 @@ func requireUserTenant(
 	users domain.UserRepo,
 	tenants domain.TenantRepo,
 ) (*domain.User, *domain.Tenant, error) {
-	identity := middleware.UserFromContext(ctx)
-	if identity == nil {
+	claims := middleware.UserFromContext(ctx)
+	if claims == nil {
 		return nil, nil, fuego.HTTPError{
 			Status: http.StatusInternalServerError,
 			Title:  "user missing in context",
 		}
 	}
 
-	user, err := users.FindByExeDevID(ctx, identity.ExeDevUserID)
+	user, err := users.FindBySub(ctx, claims.Sub)
 	if err != nil {
 		return nil, nil, fuego.HTTPError{
 			Status: http.StatusInternalServerError,

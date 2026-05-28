@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"einar-exe/internal/adapter/out/casdoor"
 	"einar-exe/internal/adapter/out/metabase"
 	"einar-exe/internal/adapter/out/openobserve"
 	"einar-exe/internal/domain"
@@ -29,24 +30,44 @@ type SignupResponse struct {
 	TenantID    string `json:"tenantId"`
 	Slug        string `json:"slug"`
 	DisplayName string `json:"displayName"`
-	RedirectTo  string `json:"redirectTo"`
+	// RedirectTo: URL absoluta-path al workspace del tenant.
+	// El frontend hace window.location = redirectTo tras el signup.
+	RedirectTo string `json:"redirectTo"`
 }
 
 // apiSignupHandler — POST /api/signup
 //
-// Crea un tenant nuevo y asigna al user autenticado como owner.
-// No longer provisions Casdoor organizations.
+// Crea un tenant nuevo, aprovisiona la organization correspondiente en
+// Casdoor, y asigna al user autenticado como owner.
+//
+// Reglas:
+//   - User debe estar autenticado (middleware ya validó la cookie).
+//   - User NO debe tener tenant todavía (un email = un tenant en MVP).
+//   - Slug debe pasar el CHECK constraint: ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$
+//
+// Transaccionalidad pragmática:
+//   1. INSERT tenant en Postgres
+//   2. POST /api/add-organization en Casdoor
+//   3. UPDATE tenant.casdoor_org en Postgres
+//   4. UPDATE user.tenant_id + role en Postgres
+//
+// Si (2) falla → rollback de (1) (DELETE FROM tenants).
+// Si (3) falla → dejamos el org en Casdoor pero el tenant queda sin
+//                link; un job de reconciliación futuro lo arregla.
+// Si (4) falla → idem; el user puede reintentar /api/signup y caer en
+//                ErrAlreadyExists del slug, que tratamos como recovery.
 func apiSignupHandler(
 	api *APIGroup,
 	tenants domain.TenantRepo,
 	users domain.UserRepo,
 	apps domain.EmbeddedAppRepo,
+	cas *casdoor.Admin,
 	oo *openobserve.Admin,
 	mb *metabase.Admin,
 ) {
 	fuego.Post(api.Server, "/signup", func(c fuego.ContextWithBody[SignupRequest]) (SignupResponse, error) {
-		identity := middleware.UserFromContext(c.Context())
-		if identity == nil {
+		claims := middleware.UserFromContext(c.Context())
+		if claims == nil {
 			return SignupResponse{}, fuego.HTTPError{
 				Status: http.StatusInternalServerError,
 				Title:  "user missing in context",
@@ -62,6 +83,7 @@ func apiSignupHandler(
 			}
 		}
 
+		// Normalizar inputs antes de validar.
 		body.Slug = strings.ToLower(strings.TrimSpace(body.Slug))
 		body.DisplayName = strings.TrimSpace(body.DisplayName)
 		if body.Slug == "" || body.DisplayName == "" {
@@ -73,7 +95,10 @@ func apiSignupHandler(
 
 		ctx := c.Context()
 
-		user, err := users.FindByExeDevID(ctx, identity.ExeDevUserID)
+		// Recuperar el user de DB. EnsureBySub ya corrió en /auth/callback,
+		// pero por seguridad lo invocamos por si alguien postea sin haber
+		// pasado por callback (ej. flujo manual con cookie de otra sesión).
+		user, err := users.FindBySub(ctx, claims.Sub)
 		if err != nil {
 			return SignupResponse{}, fuego.HTTPError{
 				Status: http.StatusInternalServerError,
@@ -112,7 +137,39 @@ func apiSignupHandler(
 			}
 		}
 
-		// 2. Asignar al user como owner.
+		// 2. Aprovisionar org en Casdoor.
+		if err := cas.CreateOrganization(ctx, tenant.Slug, tenant.DisplayName); err != nil {
+			if !errors.Is(err, casdoor.ErrAlreadyExists) {
+				// Rollback del tenant. Usamos un context separado por si el
+				// error original fue un timeout: queremos que el DELETE
+				// tenga su propio chance.
+				delCtx, cancel := context.WithTimeout(context.Background(), 3*1e9)
+				defer cancel()
+				if derr := tenants.Delete(delCtx, tenant.ID); derr != nil {
+					slog.Error("signup rollback failed",
+						"tenantID", tenant.ID, "err", derr)
+				}
+				return SignupResponse{}, fuego.HTTPError{
+					Status: http.StatusBadGateway,
+					Title:  "could not provision casdoor organization",
+					Detail: err.Error(),
+				}
+			}
+			// AlreadyExists = recovery de un signup previo que se cayó entre
+			// step 2 y 3. Continuamos.
+			slog.Warn("casdoor org already exists, treating as recovery",
+				"slug", tenant.Slug)
+		}
+
+		// 3. Linkear tenant <-> casdoor_org.
+		if err := tenants.SetCasdoorOrg(ctx, tenant.ID, tenant.Slug); err != nil {
+			slog.Error("could not link casdoor_org; manual reconcile needed",
+				"tenantID", tenant.ID, "slug", tenant.Slug, "err", err)
+			// No fallamos: el org existe en Casdoor y el tenant en DB.
+			// El campo casdoor_org se puede setear después con un job.
+		}
+
+		// 4. Asignar al user como owner.
 		if err := users.AssignTenant(ctx, user.ID, tenant.ID, domain.RoleOwner); err != nil {
 			return SignupResponse{}, fuego.HTTPError{
 				Status: http.StatusInternalServerError,
@@ -121,7 +178,9 @@ func apiSignupHandler(
 			}
 		}
 
-		// 3. Aprovisionar OpenObserve org. Best-effort.
+		// 5. Aprovisionar OpenObserve org. Best-effort: si falla, dejamos
+		//    el tenant creado y un job de reconciliación futuro lo arregla.
+		//    No queremos romper signup por una dependencia secundaria.
 		provisionOpenObserve(ctx, oo, tenants, apps, tenant)
 		provisionMetabase(ctx, mb, tenants, apps, tenant)
 
@@ -132,10 +191,15 @@ func apiSignupHandler(
 			RedirectTo:  "/t/" + tenant.Slug + "/",
 		}, nil
 	})
+
 }
 
 // provisionOpenObserve crea la org del tenant en OO, persiste el ID
 // devuelto, y registra la embedded_app system con el iframe URL.
+//
+// Best-effort: cualquier fallo se loggea pero NO rompe signup. Un job
+// de reconciliación futuro detectará tenants con openobserve_org_id IS NULL
+// y reintenta.
 func provisionOpenObserve(
 	ctx context.Context,
 	oo *openobserve.Admin,
@@ -162,6 +226,9 @@ func provisionOpenObserve(
 		return
 	}
 
+	// User dedicado por tenant. Email derivado del slug (único en el
+	// scope de OO). Password random; lo guardamos en plaintext por
+	// ahora (ver migración 0005 para el TODO de encriptación at-rest).
 	ooEmail := tenant.Slug + "@" + tenant.Slug + ".einar.local"
 	ooPassword, err := openobserve.GeneratePassword()
 	if err != nil {
@@ -174,6 +241,10 @@ func provisionOpenObserve(
 				"tenant", tenant.Slug, "err", err)
 			return
 		}
+		// Recovery: el user ya existía. No podemos recuperar la password
+		// (OO la hashea), así que la rotamos llamando a UpdateUser. Por
+		// MVP simplemente loggeamos y dejamos las creds como NULL — el user
+		// puede usar "Rotar" desde la UI.
 		slog.Warn("OO user already existed; credentials NOT updated",
 			"tenant", tenant.Slug)
 	} else {
@@ -183,6 +254,10 @@ func provisionOpenObserve(
 		}
 	}
 
+	// La embedded_app system para OO. `origin` es path-relative ("/o2")
+	// porque vive en el mismo dominio que el shell. El frontend detecta
+	// que el origin empieza con "/" y lo trata como same-origin (no
+	// dispara postMessage handshake).
 	if _, err := apps.CreateSystem(ctx, tenant.ID, "OpenObserve", "/o2", nil, 10); err != nil {
 		slog.Warn("could not insert OpenObserve system app",
 			"tenant", tenant.Slug, "err", err)
@@ -210,6 +285,8 @@ func provisionMetabase(
 				"tenant", tenant.Slug, "err", err)
 			return
 		}
+		// Recovery: signup previo creó el group pero falló después.
+		// Buscamos el ID existente y seguimos el flow.
 		slog.Warn("metabase group already exists; finding existing id",
 			"tenant", tenant.Slug)
 		if groupID, err = mb.FindGroupByName(ctx, groupName); err != nil {
@@ -227,6 +304,7 @@ func provisionMetabase(
 				"tenant", tenant.Slug, "err", err)
 			return
 		}
+		// Mismo recovery que para group.
 		slog.Warn("metabase collection already exists; finding existing id",
 			"tenant", tenant.Slug)
 		if collectionID, err = mb.FindCollectionByName(ctx, collectionName); err != nil {
@@ -237,6 +315,8 @@ func provisionMetabase(
 	}
 
 	if err := mb.SetCollectionPermission(ctx, collectionID, groupID, "write"); err != nil {
+		// No fatal: el group puede igual ver, solo que perms quedan a
+		// default (sin acceso). Se puede arreglar manual desde la UI de MB.
 		slog.Warn("could not set metabase collection permission",
 			"tenant", tenant.Slug, "err", err)
 	}
@@ -256,6 +336,10 @@ func provisionMetabase(
 				"tenant", tenant.Slug, "err", err)
 			return
 		}
+		// Recovery: el user ya existía. No tenemos su password (Metabase
+		// no la expone), así que los creds "que conoce el shell" quedan
+		// inválidos. Persistimos email vacío para que /credentials muestre
+		// el card vacío con un CTA "Rotar" (futuro: Tier 2.2 de NEXT_STEPS).
 		slog.Warn("metabase user already existed; creds left empty",
 			"tenant", tenant.Slug, "email", mbEmail)
 		credsValid = false
@@ -269,11 +353,18 @@ func provisionMetabase(
 			return
 		}
 	} else {
+		// Igual persistimos los IDs (group + collection) que conocemos
+		// para que el sidenav muestre Metabase. Email/password vacíos.
 		_ = tenants.SetMetabaseProvisioning(ctx, tenant.ID,
 			groupID, collectionID, "", "")
 	}
 
+	// system embedded_app: ALWAYS, incluso si el user no se creó con
+	// creds nuevas. La app aparece en sidenav y al click el iframe
+	// muestra el login de Metabase para que el user use sus creds.
 	if _, err := apps.CreateSystem(ctx, tenant.ID, "Metabase", "/mb", nil, 20); err != nil {
+		// Conflict (ya existe) es esperado en re-signup; otros errores
+		// los loggeamos pero no bloqueamos.
 		slog.Warn("could not insert Metabase system app",
 			"tenant", tenant.Slug, "err", err)
 	}

@@ -10,7 +10,11 @@ import (
 // requiredEnvs son las variables sin envDefault que la app exige al arrancar.
 // Si una falta, env.Parse devuelve error (twelve-factor III: fail fast).
 var requiredEnvs = map[string]string{
-	"DATABASE_URL": "postgres://einar:test@localhost:5432/einar?sslmode=disable",
+	"DATABASE_URL":              "postgres://einar:test@localhost:5432/einar?sslmode=disable",
+	"CASDOOR_ENDPOINT_INTERNAL": "http://casdoor:8000",
+	"CASDOOR_CLIENT_ID":         "test-client-id",
+	"CASDOOR_CLIENT_SECRET":     "test-client-secret",
+	"APP_OAUTH_REDIRECT_URI":    "http://localhost:8080/auth/callback",
 }
 
 // chdirToNoEnv evita que parse.go cargue el .env real del repo durante el test.

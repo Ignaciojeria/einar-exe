@@ -59,11 +59,11 @@ func apiTokensHandler(api *APIGroup, users domain.UserRepo, tokens domain.APITok
 			return TokenCreateResponse{}, fuego.HTTPError{Status: http.StatusBadRequest, Title: "scopes are required"}
 		}
 
-		identity := middleware.UserFromContext(c.Context())
-		if identity == nil {
+		claims := middleware.UserFromContext(c.Context())
+		if claims == nil {
 			return TokenCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "user missing in context"}
 		}
-		user, err := users.FindByExeDevID(c.Context(), identity.ExeDevUserID)
+		user, err := users.FindBySub(c.Context(), claims.Sub)
 		if err != nil {
 			return TokenCreateResponse{}, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not load user", Detail: err.Error()}
 		}
@@ -82,11 +82,11 @@ func apiTokensHandler(api *APIGroup, users domain.UserRepo, tokens domain.APITok
 	})
 
 	fuego.Get(api.Server, "/tokens", func(c fuego.ContextNoBody) (map[string][]TokenDTO, error) {
-		identity := middleware.UserFromContext(c.Context())
-		if identity == nil {
+		claims := middleware.UserFromContext(c.Context())
+		if claims == nil {
 			return nil, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "user missing in context"}
 		}
-		user, err := users.FindByExeDevID(c.Context(), identity.ExeDevUserID)
+		user, err := users.FindBySub(c.Context(), claims.Sub)
 		if err != nil {
 			return nil, fuego.HTTPError{Status: http.StatusInternalServerError, Title: "could not load user", Detail: err.Error()}
 		}
@@ -107,12 +107,12 @@ func apiTokensHandler(api *APIGroup, users domain.UserRepo, tokens domain.APITok
 			writeAPIError(w, http.StatusBadRequest, "invalid id", err.Error())
 			return
 		}
-		identity := middleware.UserFromContext(r.Context())
-		if identity == nil {
+		claims := middleware.UserFromContext(r.Context())
+		if claims == nil {
 			writeAPIError(w, http.StatusInternalServerError, "user missing in context", "")
 			return
 		}
-		user, err := users.FindByExeDevID(r.Context(), identity.ExeDevUserID)
+		user, err := users.FindBySub(r.Context(), claims.Sub)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "could not load user", err.Error())
 			return

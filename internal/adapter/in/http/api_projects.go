@@ -151,7 +151,7 @@ func apiProjectsHandler(
 				Mode:   "single-owner",
 			},
 			Metadata: domain.RuntimeMetadata{
-				OwnerUserID: user.ExeDevUserID,
+				OwnerUserID: user.CasdoorSub,
 				CreatedAt:   p.CreatedAt,
 				UpdatedAt:   p.UpdatedAt,
 			},

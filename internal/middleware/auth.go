@@ -1,7 +1,7 @@
 // Package middleware contiene middlewares HTTP reutilizables.
 //
-// Auth: reads exe.dev proxy headers (X-ExeDev-UserID, X-ExeDev-Email)
-// or Bearer token (PAT) and places user identity in the context.
+// Auth: valida cookie de sesión OIDC o Bearer token para clientes CLI
+// (PAT propio o id_token OIDC de Casdoor) y coloca claims/scopes en el context.
 package middleware
 
 import (
@@ -9,31 +9,41 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
+	"einar-exe/internal/adapter/out/oidc"
 	"einar-exe/internal/domain"
+	"einar-exe/internal/shared/environment"
 
 	"github.com/Ignaciojeria/ioc"
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 )
 
 var _ = ioc.Register(NewAuth)
 
-// UserIdentity represents the authenticated user from exe.dev headers or PAT.
-type UserIdentity struct {
-	ExeDevUserID string
-	Email        string
-}
+const (
+	cookieSession = "einar_session"
+	cookieRefresh = "einar_refresh"
+)
+
+const refreshThreshold = 2 * time.Minute
 
 type userCtxKey struct{}
 type scopeCtxKey struct{}
 
-func UserFromContext(ctx context.Context) *UserIdentity {
-	c, _ := ctx.Value(userCtxKey{}).(*UserIdentity)
+func UserFromContext(ctx context.Context) *oidc.Claims {
+	c, _ := ctx.Value(userCtxKey{}).(*oidc.Claims)
 	return c
 }
 
-func withUser(ctx context.Context, c *UserIdentity) context.Context {
+func withUser(ctx context.Context, c *oidc.Claims) context.Context {
 	return context.WithValue(ctx, userCtxKey{}, c)
 }
 
@@ -52,63 +62,68 @@ func HasScope(ctx context.Context, scope string) bool {
 }
 
 type Auth struct {
-	users  domain.UserRepo
-	tokens domain.APITokenRepo
+	provider *oidc.Provider
+	env      environment.Conf
+	users    domain.UserRepo
+	tenants  domain.TenantRepo
+	tokens   domain.APITokenRepo
+	sf       singleflight.Group
 }
 
-func NewAuth(users domain.UserRepo, tokens domain.APITokenRepo) *Auth {
-	return &Auth{users: users, tokens: tokens}
+func NewAuth(p *oidc.Provider, env environment.Conf, users domain.UserRepo, tenants domain.TenantRepo, tokens domain.APITokenRepo) *Auth {
+	return &Auth{provider: p, env: env, users: users, tenants: tenants, tokens: tokens}
 }
 
 func (a *Auth) Require() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identity, scopes, err := a.authenticate(r)
+			claims, scopes, err := a.authenticate(w, r)
 			if err != nil {
 				writeUnauthorized(w, err)
 				return
 			}
-			ctx := withUser(r.Context(), identity)
+			ctx := withUser(r.Context(), claims)
 			ctx = withScopes(ctx, scopes)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-func (a *Auth) authenticate(r *http.Request) (*UserIdentity, []string, error) {
-	// 1. Try Bearer token (PAT) first — used by CLI.
-	if identity, scopes, ok := a.tryBearerToken(r); ok {
-		return identity, scopes, nil
+func (a *Auth) authenticate(w http.ResponseWriter, r *http.Request) (*oidc.Claims, []string, error) {
+	if claims, scopes, ok := a.tryBearerToken(r); ok {
+		return claims, scopes, nil
 	}
 
-	// 2. Try exe.dev proxy headers — used by browser.
-	userID := r.Header.Get("X-ExeDev-UserID")
-	email := r.Header.Get("X-ExeDev-Email")
-	if userID != "" {
-		// Ensure user exists in DB (upsert).
-		var emailPtr *string
-		if email != "" {
-			emailPtr = &email
-		}
-		if _, err := a.users.EnsureByExeDevID(r.Context(), userID, emailPtr); err != nil {
+	sessionCookie, err := r.Cookie(cookieSession)
+	if err != nil || sessionCookie.Value == "" {
+		claims, err := a.tryRefresh(w, r)
+		if err != nil {
 			return nil, nil, err
 		}
-		return &UserIdentity{
-			ExeDevUserID: userID,
-			Email:        email,
-		}, []string{"*"}, nil
+		return claims, []string{"*"}, nil
 	}
 
-	return nil, nil, errNoAuth
+	idToken, err := a.provider.Verifier.Verify(r.Context(), sessionCookie.Value)
+	if err != nil {
+		claims, err := a.tryRefresh(w, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		return claims, []string{"*"}, nil
+	}
+
+	if time.Until(idToken.Expiry) < refreshThreshold {
+		_, _ = a.tryRefresh(w, r)
+	}
+
+	claims := &oidc.Claims{}
+	if err := idToken.Claims(claims); err != nil {
+		return nil, nil, err
+	}
+	return claims, []string{"*"}, nil
 }
 
-var errNoAuth = &authError{"no authentication provided (no exe.dev headers or Bearer token)"}
-
-type authError struct{ msg string }
-
-func (e *authError) Error() string { return e.msg }
-
-func (a *Auth) tryBearerToken(r *http.Request) (*UserIdentity, []string, bool) {
+func (a *Auth) tryBearerToken(r *http.Request) (*oidc.Claims, []string, bool) {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if h == "" || !strings.HasPrefix(strings.ToLower(h), "bearer ") {
 		return nil, nil, false
@@ -118,25 +133,192 @@ func (a *Auth) tryBearerToken(r *http.Request) (*UserIdentity, []string, bool) {
 		return nil, nil, false
 	}
 
-	// PAT lookup by hash.
+	// 1) Intentar como PAT interno (hash lookup en DB).
 	sum := sha256.Sum256([]byte(raw))
 	tokenHash := hex.EncodeToString(sum[:])
 	tok, err := a.tokens.FindActiveByHash(r.Context(), tokenHash)
+	if err == nil {
+		user, err := a.users.FindByID(r.Context(), tok.UserID)
+		if err != nil {
+			return nil, nil, false
+		}
+		_ = a.tokens.TouchLastUsed(r.Context(), tok.ID)
+
+		claims := &oidc.Claims{Sub: user.CasdoorSub}
+		if user.Email != nil {
+			claims.Email = *user.Email
+		}
+		return claims, tok.Scopes, true
+	}
+
+	// 2) Fallback: intentar como id_token OIDC emitido por Casdoor
+	// (útil para CLI con login PKCE sin pedir API key/PAT manual).
+	idToken, err := a.provider.Verifier.Verify(r.Context(), raw)
 	if err != nil {
 		return nil, nil, false
 	}
 
-	user, err := a.users.FindByID(r.Context(), tok.UserID)
+	claims := &oidc.Claims{}
+	if err := idToken.Claims(claims); err != nil {
+		return nil, nil, false
+	}
+	if claims.Sub == "" {
+		return nil, nil, false
+	}
+
+	var emailPtr *string
+	if claims.Email != "" {
+		e := claims.Email
+		emailPtr = &e
+	}
+	user, err := a.users.EnsureBySub(r.Context(), claims.Sub, emailPtr)
 	if err != nil {
 		return nil, nil, false
 	}
-	_ = a.tokens.TouchLastUsed(r.Context(), tok.ID)
-
-	identity := &UserIdentity{ExeDevUserID: user.ExeDevUserID}
-	if user.Email != nil {
-		identity.Email = *user.Email
+	if err := a.ensureTenantForUser(r.Context(), user, claims); err != nil {
+		return nil, nil, false
 	}
-	return identity, tok.Scopes, true
+
+	// OIDC bearer obtiene permisos completos de sesión web.
+	return claims, []string{"*"}, true
+}
+
+var tenantSlugCleaner = regexp.MustCompile(`[^a-z0-9]+`)
+
+func (a *Auth) ensureTenantForUser(ctx context.Context, user *domain.User, claims *oidc.Claims) error {
+	if user.HasTenant() {
+		return nil
+	}
+
+	displayName := strings.TrimSpace(claims.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(claims.Name)
+	}
+	if displayName == "" {
+		displayName = "My Workspace"
+	}
+
+	base := tenantBaseSlug(claims)
+	lastErr := error(nil)
+	for i := 0; i < 8; i++ {
+		slug := base
+		if i > 0 {
+			suffix := fmt.Sprintf("-%d", i+1)
+			if len(slug)+len(suffix) > 32 {
+				slug = slug[:32-len(suffix)]
+				slug = strings.Trim(slug, "-")
+			}
+			slug += suffix
+		}
+
+		t, err := a.tenants.Create(ctx, slug, displayName)
+		if err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+		if err := a.users.AssignTenant(ctx, user.ID, t.ID, domain.RoleOwner); err != nil {
+			if errors.Is(err, domain.ErrConflict) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("could not auto-provision tenant")
+}
+
+func tenantBaseSlug(claims *oidc.Claims) string {
+	candidate := ""
+	if at := strings.Index(claims.Email, "@"); at > 0 {
+		candidate = claims.Email[:at]
+	}
+	if candidate == "" {
+		candidate = claims.DisplayName
+	}
+	if candidate == "" {
+		candidate = claims.Name
+	}
+	if candidate == "" {
+		candidate = claims.Sub
+	}
+	candidate = strings.ToLower(strings.TrimSpace(candidate))
+	candidate = tenantSlugCleaner.ReplaceAllString(candidate, "-")
+	candidate = strings.Trim(candidate, "-")
+	if len(candidate) > 32 {
+		candidate = candidate[:32]
+		candidate = strings.Trim(candidate, "-")
+	}
+	if len(candidate) < 3 {
+		candidate = "team-" + candidate
+	}
+	if len(candidate) < 3 {
+		candidate = "team"
+	}
+	if len(candidate) > 32 {
+		candidate = candidate[:32]
+		candidate = strings.Trim(candidate, "-")
+	}
+	if strings.HasPrefix(candidate, "-") || strings.HasSuffix(candidate, "-") {
+		candidate = strings.Trim(candidate, "-")
+	}
+	if len(candidate) < 3 {
+		candidate = "team"
+	}
+	return candidate
+}
+
+func (a *Auth) tryRefresh(w http.ResponseWriter, r *http.Request) (*oidc.Claims, error) {
+	rtCookie, err := r.Cookie(cookieRefresh)
+	if err != nil || rtCookie.Value == "" {
+		return nil, errors.New("no session and no refresh_token")
+	}
+
+	v, err, _ := a.sf.Do(rtCookie.Value, func() (any, error) {
+		ts := a.provider.OAuth2Cfg.TokenSource(r.Context(), &oauth2.Token{RefreshToken: rtCookie.Value})
+		return ts.Token()
+	})
+	if err != nil {
+		return nil, err
+	}
+	newToken := v.(*oauth2.Token)
+
+	rawID, ok := newToken.Extra("id_token").(string)
+	if !ok || rawID == "" {
+		return nil, errors.New("refresh response sin id_token")
+	}
+
+	idToken, err := a.provider.Verifier.Verify(r.Context(), rawID)
+	if err != nil {
+		return nil, err
+	}
+	a.writeFreshCookies(w, rawID, newToken.RefreshToken, idToken.Expiry)
+
+	claims := &oidc.Claims{}
+	if err := idToken.Claims(claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+func (a *Auth) writeFreshCookies(w http.ResponseWriter, idToken, refreshToken string, expiry time.Time) {
+	secure := a.env.APP_ENV != "development" ||
+		(len(a.env.APP_PUBLIC_URL) >= 8 && a.env.APP_PUBLIC_URL[:8] == "https://")
+
+	maxAge := int(time.Until(expiry).Seconds())
+	if maxAge <= 0 {
+		maxAge = 3600
+	}
+	http.SetCookie(w, &http.Cookie{Name: cookieSession, Value: idToken, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+
+	if refreshToken != "" {
+		http.SetCookie(w, &http.Cookie{Name: cookieRefresh, Value: refreshToken, Path: "/", MaxAge: 30 * 24 * 3600, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
+	}
 }
 
 func writeUnauthorized(w http.ResponseWriter, err error) {
@@ -144,3 +326,5 @@ func writeUnauthorized(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthenticated", "detail": err.Error()})
 }
+
+var _ = (*gooidc.IDTokenVerifier)(nil)
