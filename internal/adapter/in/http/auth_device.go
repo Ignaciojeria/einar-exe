@@ -1,8 +1,6 @@
 package http
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,106 +11,54 @@ import (
 
 	"github.com/Ignaciojeria/ioc"
 	"github.com/go-fuego/fuego"
+	"github.com/google/uuid"
 )
 
 var _ = ioc.Register(authDeviceHandler)
 
-// ── In-memory store para device codes ────────────────────────────────
+// ── In-memory store para device sessions ─────────────────────────────────────
 // En producción se movería a Redis/Postgres. Para un solo nodo es OK.
 
 const (
-	deviceCodeTTL          = 15 * time.Minute
-	deviceMaxActiveSessions = 100   // max sesiones simultáneas (previene memory exhaustion)
-	deviceMaxFailedAttempts = 5     // max intentos fallidos por IP antes de lockout
-	deviceFailedWindow     = 10 * time.Minute
-	deviceMinPollInterval  = 5 * time.Second
+	deviceCodeTTL           = 15 * time.Minute
+	deviceMaxActiveSessions = 100
+	deviceMinPollInterval   = 5 * time.Second
 )
 
 type deviceSession struct {
-	DeviceCode   string
-	UserCode     string
+	DeviceCode   string // opaque, lo usa el CLI para polling
+	SessionID    string // UUID en la URL que abre el usuario
 	ExpiresAt    time.Time
-	Interval     int // polling interval en segundos
 	IDToken      string
 	RefreshToken string
 	Authorized   bool
-	LastPoll     time.Time // para throttle de polling
-}
-
-type failedAttempt struct {
-	Count    int
-	FirstAt  time.Time
+	LastPoll     time.Time
 }
 
 var (
-	deviceMu       sync.Mutex
-	devicesByUser   = map[string]*deviceSession{} // user_code → session
-	devicesByDevice = map[string]*deviceSession{} // device_code → session
+	deviceMu      sync.Mutex
+	devicesByID   = map[string]*deviceSession{} // session_id (UUID) → session
+	devicesByCode = map[string]*deviceSession{} // device_code → session
 
-	// Rate limiting: IP → failed attempts para /auth/device/confirm
-	deviceFailedMu    sync.Mutex
-	deviceFailedByIP  = map[string]*failedAttempt{}
-
-	// Rate limiting: IP → last request para /api/auth/device/code
-	deviceCodeRateMu  sync.Mutex
+	// Rate limit para POST /api/auth/device/code
+	deviceCodeRateMu   sync.Mutex
 	deviceCodeRateByIP = map[string]time.Time{}
 )
 
 func cleanExpiredDeviceSessions() {
 	now := time.Now()
-	for k, s := range devicesByUser {
+	for k, s := range devicesByID {
 		if now.After(s.ExpiresAt) {
-			delete(devicesByUser, k)
+			delete(devicesByID, k)
 		}
 	}
-	for k, s := range devicesByDevice {
+	for k, s := range devicesByCode {
 		if now.After(s.ExpiresAt) {
-			delete(devicesByDevice, k)
+			delete(devicesByCode, k)
 		}
 	}
 }
 
-func cleanExpiredFailedAttempts() {
-	now := time.Now()
-	for k, v := range deviceFailedByIP {
-		if now.Sub(v.FirstAt) > deviceFailedWindow {
-			delete(deviceFailedByIP, k)
-		}
-	}
-}
-
-// isIPBlocked checks if an IP has too many failed code confirmations.
-func isIPBlocked(ip string) bool {
-	deviceFailedMu.Lock()
-	defer deviceFailedMu.Unlock()
-	cleanExpiredFailedAttempts()
-	fa, ok := deviceFailedByIP[ip]
-	if !ok {
-		return false
-	}
-	return fa.Count >= deviceMaxFailedAttempts
-}
-
-// recordFailedAttempt increments failed attempts for an IP.
-func recordFailedAttempt(ip string) {
-	deviceFailedMu.Lock()
-	defer deviceFailedMu.Unlock()
-	fa, ok := deviceFailedByIP[ip]
-	if !ok {
-		deviceFailedByIP[ip] = &failedAttempt{Count: 1, FirstAt: time.Now()}
-		return
-	}
-	fa.Count++
-}
-
-// clearFailedAttempts resets on successful confirmation.
-func clearFailedAttempts(ip string) {
-	deviceFailedMu.Lock()
-	defer deviceFailedMu.Unlock()
-	delete(deviceFailedByIP, ip)
-}
-
-// clientIP extracts the real client IP from the request.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.SplitN(xff, ",", 2)
@@ -122,40 +68,15 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// generateUserCode genera un código legible tipo "ABCD-EFGH" (8 chars alfanum).
-func generateUserCode() (string, error) {
-	// Solo consonantes+dígitos para evitar palabras ofensivas accidentales
-	const alphabet = "BCDFGHJKLMNPQRSTVWXYZ2345679"
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	for i := range b {
-		b[i] = alphabet[int(b[i])%len(alphabet)]
-	}
-	return string(b[:4]) + "-" + string(b[4:]), nil
-}
-
-func generateDeviceCode() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// ── Handlers ─────────────────────────────────────────────────────────
+// ── Request/Response types ───────────────────────────────────────────────────
 
 type DeviceCodeRequest struct {
 	ClientID string `json:"client_id"`
-	Scope    string `json:"scope"`
 }
 
 type DeviceCodeResponse struct {
 	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
 	VerificationURI string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete"`
 	ExpiresIn       int    `json:"expires_in"`
 	Interval        int    `json:"interval"`
 }
@@ -176,8 +97,9 @@ type DeviceTokenResponse struct {
 }
 
 func authDeviceHandler(s *fuego.Server, env environment.Conf) {
-	// ── POST /api/auth/device/code ──────────────────────────────────
-	// CLI llama esto para obtener un user_code que mostrar al usuario.
+	// ── POST /api/auth/device/code ──────────────────────────────────────
+	// CLI llama esto. Recibe un device_code (para polling) y una URL
+	// con UUID embebido que el usuario abre en cualquier browser.
 	fuego.Post(s, "/api/auth/device/code",
 		func(c fuego.ContextWithBody[DeviceCodeRequest]) (DeviceCodeResponse, error) {
 			body, err := c.Body()
@@ -188,63 +110,51 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 				return DeviceCodeResponse{}, fuego.HTTPError{Status: 401, Title: "invalid client_id"}
 			}
 
-			// Rate limit: max 1 request per 10s per IP
+			// Rate limit: 1 req / 10s por IP
 			ip := clientIP(c.Request())
 			deviceCodeRateMu.Lock()
-			last, exists := deviceCodeRateByIP[ip]
-			if exists && time.Since(last) < 10*time.Second {
+			if last, ok := deviceCodeRateByIP[ip]; ok && time.Since(last) < 10*time.Second {
 				deviceCodeRateMu.Unlock()
-				return DeviceCodeResponse{}, fuego.HTTPError{Status: 429, Title: "slow_down", Detail: "wait 10 seconds between requests"}
+				return DeviceCodeResponse{}, fuego.HTTPError{Status: 429, Title: "slow_down"}
 			}
 			deviceCodeRateByIP[ip] = time.Now()
 			deviceCodeRateMu.Unlock()
 
-			// Max active sessions globally
+			// Max active sessions
 			deviceMu.Lock()
 			cleanExpiredDeviceSessions()
-			if len(devicesByDevice) >= deviceMaxActiveSessions {
+			if len(devicesByCode) >= deviceMaxActiveSessions {
 				deviceMu.Unlock()
-				return DeviceCodeResponse{}, fuego.HTTPError{Status: 503, Title: "too many active device sessions"}
+				return DeviceCodeResponse{}, fuego.HTTPError{Status: 503, Title: "too many active sessions"}
 			}
 			deviceMu.Unlock()
 
-			userCode, err := generateUserCode()
-			if err != nil {
-				return DeviceCodeResponse{}, fuego.HTTPError{Status: 500, Title: "code generation failed"}
-			}
-			deviceCode, err := generateDeviceCode()
-			if err != nil {
-				return DeviceCodeResponse{}, fuego.HTTPError{Status: 500, Title: "code generation failed"}
-			}
+			sessionID := uuid.New().String()
+			deviceCode := uuid.New().String()
 
 			sess := &deviceSession{
 				DeviceCode: deviceCode,
-				UserCode:   userCode,
-				ExpiresAt:  time.Now().Add(15 * time.Minute),
-				Interval:   5,
+				SessionID:  sessionID,
+				ExpiresAt:  time.Now().Add(deviceCodeTTL),
 			}
 
 			deviceMu.Lock()
-			cleanExpiredDeviceSessions()
-			devicesByUser[userCode] = sess
-			devicesByDevice[deviceCode] = sess
+			devicesByID[sessionID] = sess
+			devicesByCode[deviceCode] = sess
 			deviceMu.Unlock()
 
 			baseURL := strings.TrimRight(env.APP_PUBLIC_URL, "/")
-			verificationURI := baseURL + "/auth/device"
 
 			return DeviceCodeResponse{
-				DeviceCode:              deviceCode,
-				UserCode:                userCode,
-				VerificationURI:         verificationURI,
-				VerificationURIComplete: verificationURI + "?code=" + userCode,
-				ExpiresIn:               900, // 15 min
-				Interval:                5,
+				DeviceCode:      deviceCode,
+				VerificationURI: fmt.Sprintf("%s/auth/device/%s", baseURL, sessionID),
+				ExpiresIn:       900,
+				Interval:        5,
 			}, nil
 		})
 
-	// ── POST /api/auth/device/token ─────────────────────────────────
-	// CLI hace polling aquí hasta que el usuario complete el login.
+	// ── POST /api/auth/device/token ─────────────────────────────────────
+	// CLI hace polling cada 5s con el device_code.
 	fuego.Post(s, "/api/auth/device/token",
 		func(c fuego.ContextWithBody[DeviceTokenRequest]) (DeviceTokenResponse, error) {
 			body, err := c.Body()
@@ -253,9 +163,8 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 			}
 
 			deviceMu.Lock()
-			sess, ok := devicesByDevice[body.DeviceCode]
+			sess, ok := devicesByCode[body.DeviceCode]
 			if ok {
-				// Throttle: enforce minimum poll interval
 				if time.Since(sess.LastPoll) < deviceMinPollInterval {
 					deviceMu.Unlock()
 					return DeviceTokenResponse{Error: "slow_down"}, nil
@@ -272,13 +181,13 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 				return DeviceTokenResponse{Error: "authorization_pending"}, nil
 			}
 
-			// Authorized! Return tokens and clean up.
+			// Authorized — entregar tokens y limpiar (single-use).
 			idToken := sess.IDToken
 			refreshToken := sess.RefreshToken
 
 			deviceMu.Lock()
-			delete(devicesByUser, sess.UserCode)
-			delete(devicesByDevice, sess.DeviceCode)
+			delete(devicesByID, sess.SessionID)
+			delete(devicesByCode, sess.DeviceCode)
 			deviceMu.Unlock()
 
 			return DeviceTokenResponse{
@@ -286,56 +195,31 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 				IDToken:      idToken,
 				RefreshToken: refreshToken,
 				TokenType:    "Bearer",
-				ExpiresIn:    604800, // 7 días (Casdoor default)
+				ExpiresIn:    604800,
 			}, nil
 		})
 
-	// ── GET /auth/device ────────────────────────────────────────────
-	// Página donde el usuario ingresa o confirma el user_code.
-	// Si ?code=XXXX-YYYY viene en la URL, pre-rellena.
-	fuego.GetStd(s, "/auth/device", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userCode := strings.TrimSpace(r.URL.Query().Get("code"))
-		html := devicePageHTML(env, userCode)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(200)
-		w.Write([]byte(html))
-	}))
-
-	// ── POST /auth/device/confirm ───────────────────────────────────
-	// El formulario HTML envía el user_code aquí. Redirige a Casdoor
-	// login con state = device:{user_code} para que el callback sepa
-	// que es un device flow.
-	fuego.PostStd(s, "/auth/device/confirm", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("code")))
-		ip := clientIP(r)
-
-		// Brute-force protection
-		if isIPBlocked(ip) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Retry-After", "600")
-			w.WriteHeader(429)
-			w.Write([]byte(deviceErrorHTML("Demasiados intentos fallidos. Esperá 10 minutos.")))
-			return
-		}
+	// ── GET /auth/device/{id} ───────────────────────────────────────────
+	// El usuario abre esta URL directamente desde el CLI.
+	// Si el UUID es válido → redirige directo a OAuth (sin formulario).
+	fuego.GetStd(s, "/auth/device/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.PathValue("id")
 
 		deviceMu.Lock()
-		_, exists := devicesByUser[userCode]
+		sess, ok := devicesByID[sessionID]
 		deviceMu.Unlock()
 
-		if !exists {
-			recordFailedAttempt(ip)
+		if !ok || time.Now().After(sess.ExpiresAt) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(400)
-			w.Write([]byte(deviceErrorHTML("Código inválido o expirado. Volvé a intentar desde tu CLI.")))
+			w.WriteHeader(404)
+			fmt.Fprint(w, deviceErrorHTML("Link expirado o inválido. Volvé a ejecutar el comando en tu CLI."))
 			return
 		}
-		clearFailedAttempts(ip)
 
-		// Guardamos el user_code en una cookie para recuperarlo en el callback.
+		// Guardar session ID en cookie para recuperarlo después del OAuth
 		http.SetCookie(w, &http.Cookie{
-			Name:     "einar_device_code",
-			Value:    userCode,
+			Name:     "einar_device_session",
+			Value:    sessionID,
 			Path:     "/",
 			MaxAge:   900,
 			HttpOnly: true,
@@ -343,39 +227,33 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 			SameSite: http.SameSiteLaxMode,
 		})
 
-		// Redirigir a /auth/login con return=/auth/device/complete
+		// Redirigir directo al login OAuth
 		http.Redirect(w, r, "/auth/login?return=/auth/device/complete", http.StatusFound)
 	}))
 
-	// ── GET /auth/device/complete ───────────────────────────────────
-	// Después de que el usuario se autentica (callback normal seteó
-	// cookies de sesión), aterrizan aquí. Leemos la sesión y la
-	// ligamos al device_code.
+	// ── GET /auth/device/complete ───────────────────────────────────────
+	// Después del OAuth callback, el usuario aterriza aquí.
+	// Leemos la sesión OAuth (cookies) y la ligamos al device session.
 	fuego.GetStd(s, "/auth/device/complete", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 1. Leer user_code de la cookie
-		codeCookie, err := r.Cookie("einar_device_code")
-		if err != nil || codeCookie.Value == "" {
+		// 1. Recuperar session ID de la cookie
+		sc, err := r.Cookie("einar_device_session")
+		if err != nil || sc.Value == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(400)
-			w.Write([]byte(deviceErrorHTML("Sesión de device flow perdida. Volvé a intentar.")))
+			fmt.Fprint(w, deviceErrorHTML("Sesión de device flow perdida. Volvé a intentar."))
 			return
 		}
-		userCode := codeCookie.Value
+		sessionID := sc.Value
 
 		// Limpiar cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:   "einar_device_code",
-			Value:  "",
-			Path:   "/",
-			MaxAge: -1,
-		})
+		http.SetCookie(w, &http.Cookie{Name: "einar_device_session", Value: "", Path: "/", MaxAge: -1})
 
-		// 2. Leer el id_token de la sesión que el callback normal ya seteó
+		// 2. Leer tokens de la sesión OAuth (seteados por /auth/callback)
 		sessionCookie, err := r.Cookie(cookieSession)
 		if err != nil || sessionCookie.Value == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(401)
-			w.Write([]byte(deviceErrorHTML("No se pudo obtener la sesión. ¿Completaste el login?")))
+			fmt.Fprint(w, deviceErrorHTML("No se pudo obtener la sesión. ¿Completaste el login?"))
 			return
 		}
 
@@ -386,8 +264,8 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 
 		// 3. Ligar tokens al device session
 		deviceMu.Lock()
-		sess, ok := devicesByUser[userCode]
-		if ok {
+		sess, ok := devicesByID[sessionID]
+		if ok && !time.Now().After(sess.ExpiresAt) {
 			sess.IDToken = sessionCookie.Value
 			sess.RefreshToken = refreshToken
 			sess.Authorized = true
@@ -397,81 +275,28 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 		if !ok {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(400)
-			w.Write([]byte(deviceErrorHTML("Código expirado. Volvé a intentar desde tu CLI.")))
+			fmt.Fprint(w, deviceErrorHTML("Link expirado. Volvé a intentar desde tu CLI."))
 			return
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(200)
-		w.Write([]byte(deviceSuccessHTML()))
+		fmt.Fprint(w, deviceSuccessHTML())
 	}))
 }
 
-// ── HTML templates ───────────────────────────────────────────────────
-
-func devicePageHTML(env environment.Conf, prefilledCode string) string {
-	value := ""
-	if prefilledCode != "" {
-		value = fmt.Sprintf(` value="%s"`, prefilledCode)
-	}
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Einar CLI Login</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
-  .card { background: white; border-radius: 12px; padding: 2.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; width: 100%%; text-align: center; }
-  h1 { font-size: 1.5rem; color: #1a1a2e; margin: 0 0 0.5rem; }
-  p { color: #666; margin: 0.5rem 0 1.5rem; font-size: 0.95rem; }
-  input[type=text] { font-size: 1.8rem; text-align: center; letter-spacing: 0.3em; padding: 0.8rem; border: 2px solid #ddd; border-radius: 8px; width: 200px; font-family: monospace; text-transform: uppercase; }
-  input:focus { outline: none; border-color: #7c3aed; }
-  button { background: #7c3aed; color: white; border: none; padding: 0.8rem 2rem; font-size: 1rem; border-radius: 8px; cursor: pointer; margin-top: 1rem; width: 100%%; }
-  button:hover { background: #6d28d9; }
-  .logo { font-size: 2rem; margin-bottom: 1rem; }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="logo">⚡</div>
-  <h1>Einar CLI Login</h1>
-  <p>Ingresá el código que muestra tu terminal</p>
-  <form action="/auth/device/confirm" method="POST">
-    <input type="text" name="code" maxlength="9" placeholder="ABCD-EFGH" autocomplete="off" autofocus%s>
-    <br>
-    <button type="submit">Confirmar</button>
-  </form>
-</div>
-</body>
-</html>`, value)
-}
+// ── HTML ─────────────────────────────────────────────────────────────────────
 
 func deviceErrorHTML(msg string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="utf-8"><title>Error</title>
-<style>
-  body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
-  .card { background: white; border-radius: 12px; padding: 2.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; text-align: center; }
-  .err { color: #dc2626; font-size: 1.1rem; }
-</style>
-</head>
-<body><div class="card"><p class="err">❌ %s</p></div></body>
-</html>`, msg)
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Error</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5}.card{background:#fff;border-radius:12px;padding:2.5rem;box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:400px;text-align:center}.err{color:#dc2626;font-size:1.1rem}</style>
+</head><body><div class="card"><p class="err">❌ %s</p></div></body></html>`, msg)
 }
 
 func deviceSuccessHTML() string {
 	return `<!DOCTYPE html>
-<html lang="es">
-<head><meta charset="utf-8"><title>CLI Autorizado</title>
-<style>
-  body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
-  .card { background: white; border-radius: 12px; padding: 2.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.1); max-width: 400px; text-align: center; }
-  .ok { color: #16a34a; font-size: 1.3rem; font-weight: bold; }
-  p { color: #666; margin-top: 1rem; }
-</style>
-</head>
-<body><div class="card"><p class="ok">✅ CLI Autorizado</p><p>Podés cerrar esta pestaña y volver a tu terminal.</p></div></body>
-</html>`
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CLI Autorizado</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5}.card{background:#fff;border-radius:12px;padding:2.5rem;box-shadow:0 4px 24px rgba(0,0,0,.1);max-width:400px;text-align:center}.ok{color:#16a34a;font-size:1.3rem;font-weight:700}p{color:#666;margin-top:1rem}</style>
+</head><body><div class="card"><p class="ok">✅ CLI Autorizado</p><p>Podés cerrar esta pestaña y volver a tu terminal.</p></div></body></html>`
 }
