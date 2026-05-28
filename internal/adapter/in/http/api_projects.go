@@ -3,9 +3,11 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +28,7 @@ import (
 	"github.com/Ignaciojeria/ioc"
 	"github.com/go-fuego/fuego"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 )
 
 var _ = ioc.Register(apiProjectsHandler)
@@ -76,6 +79,26 @@ func apiProjectsHandler(
 		}
 		if err := requireOwnerOrAdmin(user); err != nil {
 			return ProjectCreateResponse{}, err
+		}
+
+		// Quota: límite duro de VMs por tenant.
+		// Sin esto, en modo signup abierto cualquier user puede vaciar la cuenta exe.dev.
+		if env.EINAR_MAX_VMS_PER_TENANT > 0 {
+			count, cerr := projects.CountByTenant(c.Context(), tenant.ID)
+			if cerr != nil {
+				return ProjectCreateResponse{}, fuego.HTTPError{
+					Status: http.StatusInternalServerError,
+					Title:  "could not check quota",
+					Detail: cerr.Error(),
+				}
+			}
+			if count >= env.EINAR_MAX_VMS_PER_TENANT {
+				return ProjectCreateResponse{}, fuego.HTTPError{
+					Status: http.StatusTooManyRequests,
+					Title:  "vm quota exceeded",
+					Detail: fmt.Sprintf("tenant %q already has %d/%d VMs. Contact admin to raise the limit.", tenant.Slug, count, env.EINAR_MAX_VMS_PER_TENANT),
+				}
+			}
 		}
 
 		baseDir := strings.TrimSpace(env.PROJECTS_BASE_DIR)
@@ -179,9 +202,11 @@ func apiProjectsHandler(
 			rc.Secrets = &domain.RuntimeSecrets{}
 			if vmInfo.APIToken != "" {
 				rc.Secrets.ProjectAPITokenSecretRef = secretsBasePath + "/api/token"
+				rc.Secrets.ProjectAPIToken = vmInfo.APIToken // inline one-shot
 			}
 			if vmInfo.SSHPrivateKey != "" {
 				rc.Secrets.SSHPrivateKeySecretRef = secretsBasePath + "/ssh/private-key"
+				rc.Secrets.SSHPrivateKey = vmInfo.SSHPrivateKey // inline one-shot
 			}
 		} else if sshDest != "" {
 			// Sin VM provisioner pero con dominio configurado
@@ -212,16 +237,27 @@ func apiProjectsHandler(
 				rc.Secrets = &domain.RuntimeSecrets{}
 			}
 			rc.Secrets.DBPasswordSecretRef = secretsBasePath + "/db/password"
+			rc.Secrets.DBPassword = p.DBPassword // inline one-shot
 		}
 
-		// Persistir runtime.json en el directorio del proyecto
-		if err := writeRuntimeConfig(projectPath, rc); err != nil {
-			// No es fatal: el proyecto ya existe en DB. Logueamos y seguimos.
+		// Persistir runtime.json en el directorio del proyecto (en el SERVIDOR einar).
+		// Importante: NO escribimos los campos inline en runtime.json — solo los
+		// SecretRef. El runtime.json sirve a procesos que corren EN el server.
+		// El user remoto recibe los inline una sola vez en la response HTTP.
+		rcForDisk := rc
+		if rcForDisk.Secrets != nil {
+			copy := *rcForDisk.Secrets
+			copy.ProjectAPIToken = ""
+			copy.SSHPrivateKey = ""
+			copy.DBPassword = ""
+			rcForDisk.Secrets = &copy
+		}
+		if err := writeRuntimeConfig(projectPath, rcForDisk); err != nil {
 			fmt.Fprintf(os.Stderr, "WARN: could not write runtime.json: %v\n", err)
 		}
 
-		// Persistir secretos reales en archivos locales (el scaffold
-		// los necesita para que el proyecto hijo pueda leerlos).
+		// Persistir secretos en archivos del server (para procesos in-server
+		// que los necesiten vía *SecretRef). El user remoto ya los tiene inline.
 		writeProjectSecrets(projectPath, p.DBPassword, vmInfo)
 
 		return rc, nil
@@ -345,7 +381,8 @@ func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, s
 	if endpoint == "" {
 		endpoint = "https://exe.dev/exec"
 	}
-	command := fmt.Sprintf("new --name=%s --json", slug)
+	// Tag = slug → permite scopear la SSH key del proyecto a esta sola VM.
+	command := fmt.Sprintf("new --name=%s --tag=%s --json", slug, slug)
 	req, err := http.NewRequestWithContext(pctx, http.MethodPost, endpoint, bytes.NewBufferString(command))
 	if err != nil {
 		return nil, err
@@ -370,12 +407,50 @@ func provisionProjectVMByHTTP(ctx context.Context, env environment.Conf, slug, s
 		return nil, err
 	}
 
+	// Generar par SSH per-VM y registrar la pubkey en exe.dev scopeada al tag
+	// del proyecto. Si algo falla, no abortamos la creación: el cliente puede
+	// caer al flujo legacy (onboarding manual). Solo logueamos.
+	if privPEM, pubAuth, err := generateEd25519SSHKey(); err == nil {
+		keyName := fmt.Sprintf("proj-%s", slug)
+		addCmd := fmt.Sprintf("ssh-key add --tag=%s %s", slug, shellQuote(strings.TrimSpace(pubAuth)+" "+keyName))
+		if addErr := exeAPIPost(pctx, endpoint, apiToken, addCmd); addErr != nil {
+			fmt.Fprintf(os.Stderr, "WARN: ssh-key add failed for %s: %v\n", slug, addErr)
+		} else {
+			result.SSHPrivateKey = privPEM
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "WARN: could not generate ssh key for %s: %v\n", slug, err)
+	}
+
 	if public && result.VMName != "" {
 		_ = exeAPIPost(pctx, endpoint, apiToken, fmt.Sprintf("share set-public %s", result.VMName))
 		_ = exeAPIPost(pctx, endpoint, apiToken, fmt.Sprintf("share port %s 8000", result.VMName))
 	}
 
 	return result, nil
+}
+
+// generateEd25519SSHKey genera un par ed25519 y devuelve la privada en formato
+// OpenSSH (PEM) y la pública en formato authorized_keys ("ssh-ed25519 AAAA...").
+func generateEd25519SSHKey() (privPEM, pubAuthorized string, err error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("ed25519 generate: %w", err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		return "", "", fmt.Errorf("marshal private key: %w", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return "", "", fmt.Errorf("new public key: %w", err)
+	}
+	return string(pem.EncodeToMemory(block)), string(ssh.MarshalAuthorizedKey(sshPub)), nil
+}
+
+// shellQuote envuelve un string en comillas simples seguras para el shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func exeAPIPost(ctx context.Context, endpoint, token, command string) error {
