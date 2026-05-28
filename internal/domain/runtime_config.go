@@ -54,6 +54,14 @@ type RuntimeSecrets struct {
 	ProjectAPITokenSecretRef string `json:"projectApiTokenSecretRef,omitempty"`
 	SSHPrivateKeySecretRef   string `json:"sshPrivateKeySecretRef,omitempty"`
 	DBPasswordSecretRef      string `json:"dbPasswordSecretRef,omitempty"`
+
+	// Inline secret material. SOLO se devuelve en la respuesta de
+	// creación del proyecto (one-shot). El CLI los guarda localmente.
+	// En reads posteriores estos campos quedan vacíos y solo se devuelven
+	// los *SecretRef. Si el user los pierde, hay que rotar.
+	ProjectAPIToken string `json:"projectApiToken,omitempty"`
+	SSHPrivateKey   string `json:"sshPrivateKey,omitempty"`
+	DBPassword      string `json:"dbPassword,omitempty"`
 }
 
 type RuntimeMetadata struct {

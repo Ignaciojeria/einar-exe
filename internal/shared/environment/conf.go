@@ -115,6 +115,18 @@ type Conf struct {
 	// ephemeral al startup (OK para dev, NO para prod — los tokens emitidos
 	// no sobreviven al restart).
 	EINAR_JWT_PRIVATE_KEY string `env:"EINAR_JWT_PRIVATE_KEY"`
+
+	// ------------------------------------------------------------
+	// Signup allowlist (anti-abuse)
+	// ------------------------------------------------------------
+	// Lista CSV de emails permitidos para crear tenant nuevo.
+	// Si está vacía, signup está abierto (NO recomendado en prod).
+	// Ej: "juan@x.com,maria@y.com"
+	EINAR_SIGNUP_ALLOWLIST string `env:"EINAR_SIGNUP_ALLOWLIST"`
+
+	// Máximo de VMs por tenant. 0 o negativo = sin límite.
+	// En modo abierto (allowlist vacía) esto es el único freno contra abuse.
+	EINAR_MAX_VMS_PER_TENANT int `env:"EINAR_MAX_VMS_PER_TENANT" envDefault:"2"`
 }
 
 func NewConf() (Conf, error) {

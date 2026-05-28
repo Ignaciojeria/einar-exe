@@ -218,6 +218,21 @@ func (r *projectRepo) FindBySlugAndTenant(
 	return p, nil
 }
 
+func (r *projectRepo) CountByTenant(
+	ctx context.Context,
+	tenantID uuid.UUID,
+) (int, error) {
+	var n int
+	err := r.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM projects WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count projects by tenant: %w", err)
+	}
+	return n, nil
+}
+
 func envOrDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

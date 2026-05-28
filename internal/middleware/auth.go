@@ -185,9 +185,35 @@ func (a *Auth) tryBearerToken(r *http.Request) (*oidc.Claims, []string, bool) {
 
 var tenantSlugCleaner = regexp.MustCompile(`[^a-z0-9]+`)
 
+// isSignupAllowed devuelve true si el email está en la allowlist CSV,
+// o si la allowlist está vacía (modo abierto). Case-insensitive.
+func isSignupAllowed(allowlistCSV, email string) bool {
+	allowlistCSV = strings.TrimSpace(allowlistCSV)
+	if allowlistCSV == "" {
+		return true // sin allowlist configurada => modo abierto
+	}
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false
+	}
+	for _, e := range strings.Split(allowlistCSV, ",") {
+		if strings.ToLower(strings.TrimSpace(e)) == email {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Auth) ensureTenantForUser(ctx context.Context, user *domain.User, claims *oidc.Claims) error {
 	if user.HasTenant() {
 		return nil
+	}
+
+	// Anti-abuse: si hay allowlist configurada, solo emails en la lista
+	// pueden crear un tenant nuevo (= consumir cuota de exe.dev).
+	// Users ya con tenant existente no se ven afectados.
+	if !isSignupAllowed(a.env.EINAR_SIGNUP_ALLOWLIST, claims.Email) {
+		return fmt.Errorf("signup not allowed for %q: not in EINAR_SIGNUP_ALLOWLIST", claims.Email)
 	}
 
 	displayName := strings.TrimSpace(claims.DisplayName)
