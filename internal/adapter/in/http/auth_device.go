@@ -20,6 +20,14 @@ var _ = ioc.Register(authDeviceHandler)
 // ── In-memory store para device codes ────────────────────────────────
 // En producción se movería a Redis/Postgres. Para un solo nodo es OK.
 
+const (
+	deviceCodeTTL          = 15 * time.Minute
+	deviceMaxActiveSessions = 100   // max sesiones simultáneas (previene memory exhaustion)
+	deviceMaxFailedAttempts = 5     // max intentos fallidos por IP antes de lockout
+	deviceFailedWindow     = 10 * time.Minute
+	deviceMinPollInterval  = 5 * time.Second
+)
+
 type deviceSession struct {
 	DeviceCode   string
 	UserCode     string
@@ -28,12 +36,26 @@ type deviceSession struct {
 	IDToken      string
 	RefreshToken string
 	Authorized   bool
+	LastPoll     time.Time // para throttle de polling
+}
+
+type failedAttempt struct {
+	Count    int
+	FirstAt  time.Time
 }
 
 var (
 	deviceMu       sync.Mutex
 	devicesByUser   = map[string]*deviceSession{} // user_code → session
 	devicesByDevice = map[string]*deviceSession{} // device_code → session
+
+	// Rate limiting: IP → failed attempts para /auth/device/confirm
+	deviceFailedMu    sync.Mutex
+	deviceFailedByIP  = map[string]*failedAttempt{}
+
+	// Rate limiting: IP → last request para /api/auth/device/code
+	deviceCodeRateMu  sync.Mutex
+	deviceCodeRateByIP = map[string]time.Time{}
 )
 
 func cleanExpiredDeviceSessions() {
@@ -48,6 +70,56 @@ func cleanExpiredDeviceSessions() {
 			delete(devicesByDevice, k)
 		}
 	}
+}
+
+func cleanExpiredFailedAttempts() {
+	now := time.Now()
+	for k, v := range deviceFailedByIP {
+		if now.Sub(v.FirstAt) > deviceFailedWindow {
+			delete(deviceFailedByIP, k)
+		}
+	}
+}
+
+// isIPBlocked checks if an IP has too many failed code confirmations.
+func isIPBlocked(ip string) bool {
+	deviceFailedMu.Lock()
+	defer deviceFailedMu.Unlock()
+	cleanExpiredFailedAttempts()
+	fa, ok := deviceFailedByIP[ip]
+	if !ok {
+		return false
+	}
+	return fa.Count >= deviceMaxFailedAttempts
+}
+
+// recordFailedAttempt increments failed attempts for an IP.
+func recordFailedAttempt(ip string) {
+	deviceFailedMu.Lock()
+	defer deviceFailedMu.Unlock()
+	fa, ok := deviceFailedByIP[ip]
+	if !ok {
+		deviceFailedByIP[ip] = &failedAttempt{Count: 1, FirstAt: time.Now()}
+		return
+	}
+	fa.Count++
+}
+
+// clearFailedAttempts resets on successful confirmation.
+func clearFailedAttempts(ip string) {
+	deviceFailedMu.Lock()
+	defer deviceFailedMu.Unlock()
+	delete(deviceFailedByIP, ip)
+}
+
+// clientIP extracts the real client IP from the request.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.SplitN(xff, ",", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	return host
 }
 
 // generateUserCode genera un código legible tipo "ABCD-EFGH" (8 chars alfanum).
@@ -116,6 +188,26 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 				return DeviceCodeResponse{}, fuego.HTTPError{Status: 401, Title: "invalid client_id"}
 			}
 
+			// Rate limit: max 1 request per 10s per IP
+			ip := clientIP(c.Request())
+			deviceCodeRateMu.Lock()
+			last, exists := deviceCodeRateByIP[ip]
+			if exists && time.Since(last) < 10*time.Second {
+				deviceCodeRateMu.Unlock()
+				return DeviceCodeResponse{}, fuego.HTTPError{Status: 429, Title: "slow_down", Detail: "wait 10 seconds between requests"}
+			}
+			deviceCodeRateByIP[ip] = time.Now()
+			deviceCodeRateMu.Unlock()
+
+			// Max active sessions globally
+			deviceMu.Lock()
+			cleanExpiredDeviceSessions()
+			if len(devicesByDevice) >= deviceMaxActiveSessions {
+				deviceMu.Unlock()
+				return DeviceCodeResponse{}, fuego.HTTPError{Status: 503, Title: "too many active device sessions"}
+			}
+			deviceMu.Unlock()
+
 			userCode, err := generateUserCode()
 			if err != nil {
 				return DeviceCodeResponse{}, fuego.HTTPError{Status: 500, Title: "code generation failed"}
@@ -162,6 +254,14 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 
 			deviceMu.Lock()
 			sess, ok := devicesByDevice[body.DeviceCode]
+			if ok {
+				// Throttle: enforce minimum poll interval
+				if time.Since(sess.LastPoll) < deviceMinPollInterval {
+					deviceMu.Unlock()
+					return DeviceTokenResponse{Error: "slow_down"}, nil
+				}
+				sess.LastPoll = time.Now()
+			}
 			deviceMu.Unlock()
 
 			if !ok || time.Now().After(sess.ExpiresAt) {
@@ -208,17 +308,29 @@ func authDeviceHandler(s *fuego.Server, env environment.Conf) {
 	fuego.PostStd(s, "/auth/device/confirm", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		userCode := strings.ToUpper(strings.TrimSpace(r.FormValue("code")))
+		ip := clientIP(r)
+
+		// Brute-force protection
+		if isIPBlocked(ip) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Retry-After", "600")
+			w.WriteHeader(429)
+			w.Write([]byte(deviceErrorHTML("Demasiados intentos fallidos. Esperá 10 minutos.")))
+			return
+		}
 
 		deviceMu.Lock()
 		_, exists := devicesByUser[userCode]
 		deviceMu.Unlock()
 
 		if !exists {
+			recordFailedAttempt(ip)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(400)
 			w.Write([]byte(deviceErrorHTML("Código inválido o expirado. Volvé a intentar desde tu CLI.")))
 			return
 		}
+		clearFailedAttempts(ip)
 
 		// Guardamos el user_code en una cookie para recuperarlo en el callback.
 		http.SetCookie(w, &http.Cookie{
