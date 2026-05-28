@@ -69,7 +69,8 @@
         path /favicon.svg
         path /icons.svg
         # Auth flow (handlers Go)
-        path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh
+        path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh, /auth/device*
+        path /api/auth/*       # /api/auth/device/code, /api/auth/device/token
         # API de la app
         path /api/me
         path /api/session
