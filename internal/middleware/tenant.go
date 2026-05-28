@@ -61,8 +61,8 @@ func (t *Tenant) Require() func(http.Handler) http.Handler {
 				return
 			}
 
-			claims := UserFromContext(r.Context())
-			if claims == nil {
+			identity := UserFromContext(r.Context())
+			if identity == nil {
 				writeJSONError(w, http.StatusInternalServerError,
 					"middleware order bug: RequireTenant ran without RequireAuth")
 				return
@@ -81,7 +81,7 @@ func (t *Tenant) Require() func(http.Handler) http.Handler {
 				return
 			}
 
-			user, err := t.users.FindBySub(ctx, claims.Sub)
+			user, err := t.users.FindByExeDevID(ctx, identity.ExeDevUserID)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError,
 					"could not load user: "+err.Error())

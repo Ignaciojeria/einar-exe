@@ -8,9 +8,7 @@ import (
 	"syscall"
 
 	_ "einar-exe/internal/adapter/in/http"
-	_ "einar-exe/internal/adapter/out/casdoor"
 	_ "einar-exe/internal/adapter/out/metabase"
-	_ "einar-exe/internal/adapter/out/oidc"
 	_ "einar-exe/internal/adapter/out/openobserve"
 	_ "einar-exe/internal/adapter/out/postgres"
 	_ "einar-exe/internal/middleware"

@@ -23,29 +23,26 @@ func NewUserRepo(pool *pgxpool.Pool) domain.UserRepo {
 	return &userRepo{pool: pool}
 }
 
-// EnsureBySub: upsert por casdoor_sub (UNIQUE). El email se refresca
-// cada vez (puede haber cambiado en Google → Casdoor → JWT).
-//
-// No tocamos tenant_id ni role aquí: este método se llama en cada
-// /auth/callback y no debe pisar la asignación que hizo /signup.
-func (r *userRepo) EnsureBySub(ctx context.Context, sub string, email *string) (*domain.User, error) {
+// EnsureByExeDevID: upsert por exedev_user_id (UNIQUE). El email se
+// refresca cada vez (puede haber cambiado en exe.dev).
+func (r *userRepo) EnsureByExeDevID(ctx context.Context, exedevUserID string, email *string) (*domain.User, error) {
 	const q = `
-		INSERT INTO users (casdoor_sub, email)
+		INSERT INTO users (exedev_user_id, email)
 		VALUES ($1, $2)
-		ON CONFLICT (casdoor_sub) DO UPDATE
+		ON CONFLICT (exedev_user_id) DO UPDATE
 		    SET email      = COALESCE(EXCLUDED.email, users.email),
 		        updated_at = now()
-		RETURNING id, tenant_id, casdoor_sub, email, role, created_at, updated_at
+		RETURNING id, tenant_id, exedev_user_id, email, role, created_at, updated_at
 	`
-	return r.scanOne(ctx, q, sub, email)
+	return r.scanOne(ctx, q, exedevUserID, email)
 }
 
-func (r *userRepo) FindBySub(ctx context.Context, sub string) (*domain.User, error) {
+func (r *userRepo) FindByExeDevID(ctx context.Context, exedevUserID string) (*domain.User, error) {
 	const q = `
-		SELECT id, tenant_id, casdoor_sub, email, role, created_at, updated_at
-		FROM users WHERE casdoor_sub = $1
+		SELECT id, tenant_id, exedev_user_id, email, role, created_at, updated_at
+		FROM users WHERE exedev_user_id = $1
 	`
-	u, err := r.scanOne(ctx, q, sub)
+	u, err := r.scanOne(ctx, q, exedevUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
@@ -54,7 +51,7 @@ func (r *userRepo) FindBySub(ctx context.Context, sub string) (*domain.User, err
 
 func (r *userRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	const q = `
-		SELECT id, tenant_id, casdoor_sub, email, role, created_at, updated_at
+		SELECT id, tenant_id, exedev_user_id, email, role, created_at, updated_at
 		FROM users WHERE id = $1
 	`
 	u, err := r.scanOne(ctx, q, id)
@@ -66,7 +63,6 @@ func (r *userRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.User, er
 
 // AssignTenant: setea tenant_id + role. Si el user ya pertenece a otro
 // tenant (tenant_id IS NOT NULL y distinto), devuelve ErrConflict.
-// El "Slack workspaces multi-membership" se decide implementar más tarde.
 func (r *userRepo) AssignTenant(ctx context.Context, userID, tenantID uuid.UUID, role domain.Role) error {
 	const q = `
 		UPDATE users
@@ -81,8 +77,6 @@ func (r *userRepo) AssignTenant(ctx context.Context, userID, tenantID uuid.UUID,
 		return fmt.Errorf("update users.tenant_id: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Dos posibilidades: el user no existe, o ya pertenece a OTRO tenant.
-		// Distinguimos para devolver el error correcto.
 		var existingTenant *uuid.UUID
 		err := r.pool.QueryRow(ctx,
 			`SELECT tenant_id FROM users WHERE id = $1`, userID,
@@ -103,7 +97,7 @@ func (r *userRepo) scanOne(ctx context.Context, q string, args ...any) (*domain.
 	var u domain.User
 	var role string
 	err := r.pool.QueryRow(ctx, q, args...).Scan(
-		&u.ID, &u.TenantID, &u.CasdoorSub, &u.Email, &role, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.TenantID, &u.ExeDevUserID, &u.Email, &role, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

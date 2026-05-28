@@ -44,7 +44,7 @@ type Admin struct {
 }
 
 // NewAdmin lee las env vars desde el Conf central (mismo patrón que
-// casdoor.Admin con CASDOOR_CLIENT_ID/SECRET).
+// similar to other admin clients in the codebase).
 func NewAdmin(env environment.Conf) *Admin {
 	return &Admin{
 		baseURL:  strings.TrimRight(env.OPENOBSERVE_ENDPOINT_INTERNAL, "/"),

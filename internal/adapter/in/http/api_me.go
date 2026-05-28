@@ -3,7 +3,6 @@ package http
 import (
 	"net/http"
 
-	"einar-exe/internal/adapter/out/oidc"
 	"einar-exe/internal/middleware"
 
 	"github.com/Ignaciojeria/ioc"
@@ -12,20 +11,13 @@ import (
 
 var _ = ioc.Register(apiMeHandler)
 
-// MeResponse: claims p\u00fablicos del usuario autenticado.
+// MeResponse: identity of the authenticated user.
 type MeResponse struct {
-	Sub         string `json:"sub"`
-	Email       string `json:"email"`
-	Name        string `json:"name,omitempty"`
-	DisplayName string `json:"displayName,omitempty"`
-	Picture     string `json:"picture,omitempty"`
+	ExeDevUserID string `json:"exeDevUserId"`
+	Email        string `json:"email"`
 }
 
 // apiMeHandler — GET /api/me
-//
-// El middleware ya valid\u00f3 la sesi\u00f3n; aqu\u00ed solo proyectamos los claims.
-// Si llega aqu\u00ed sin user en context, es bug: el middleware deber\u00eda haber
-// devuelto 401 antes.
 func apiMeHandler(api *APIGroup) {
 	fuego.Get(api.Server, "/me", func(c fuego.ContextNoBody) (MeResponse, error) {
 		u := middleware.UserFromContext(c.Context())
@@ -33,19 +25,12 @@ func apiMeHandler(api *APIGroup) {
 			return MeResponse{}, fuego.HTTPError{
 				Status: http.StatusInternalServerError,
 				Title:  "user missing in context",
-				Detail: "middleware bug: RequireAuth no inyect\u00f3 los claims",
+				Detail: "middleware bug: RequireAuth did not inject identity",
 			}
 		}
-		return claimsToMe(u), nil
+		return MeResponse{
+			ExeDevUserID: u.ExeDevUserID,
+			Email:        u.Email,
+		}, nil
 	})
-}
-
-func claimsToMe(c *oidc.Claims) MeResponse {
-	return MeResponse{
-		Sub:         c.Sub,
-		Email:       c.Email,
-		Name:        c.Name,
-		DisplayName: c.DisplayName,
-		Picture:     c.Picture,
-	}
 }

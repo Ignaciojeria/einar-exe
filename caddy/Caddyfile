@@ -1,15 +1,11 @@
 # Caddy = único ingress público del stack.
 #
 # exe.dev hace TLS termination en https://einar.exe.xyz/ y forwardea a este
-# Caddy en HTTP plano dentro de la VM. Caddy reparte por path a los 4
+# Caddy en HTTP plano dentro de la VM. Caddy reparte por path a los
 # servicios internos.
 #
-# Modelo de ruteo:
-#   - APP captura un set acotado de rutas conocidas (allowlist).
-#   - CASDOOR captura todo lo demás por defecto (UI, OAuth, /.well-known, ...).
-#   - METABASE y OPENOBSERVE bajo subpath.
-#
-# Cuando agregues un endpoint nuevo a la app, agrégalo aquí también.
+# Auth: exe.dev proxy inyecta X-ExeDev-UserID y X-ExeDev-Email headers
+# antes de llegar aquí. La app Go los lee directamente.
 
 :80 {
     log {
@@ -17,18 +13,9 @@
         format console
     }
 
-    # ── METABASE bajo /mb/* ──────────────────────────────────────────
-    # Metabase no soporta nativamente path prefix, pero para nuestro caso
-    # de embedding (iframe) basta con strippear el prefijo en la request
-    # y dejar que Metabase responda bajo "/" desde su perspectiva.
-    # MB_SITE_URL le dice cuál es la URL pública (la usa para emails y
-    # signed JWT URLs en el embedding flow).
+    # ── METABASE bajo /mb/* ────────────────────────────────────────────
     handle_path /mb/* {
         reverse_proxy metabase:3000
-        # Metabase setea X-Frame-Options: DENY y CSP frame-ancestors 'none'
-        # por default. Como el iframe vive en el mismo eTLD que el shell,
-        # los strippeamos para permitir embed. Equivalente legal:
-        # mismo dominio = misma identidad de seguridad.
         header -X-Frame-Options
         header -Content-Security-Policy
     }
@@ -36,20 +23,15 @@
         redir /mb/ permanent
     }
 
-    # ── OPENOBSERVE bajo /o2/* ────────────────────────────────────────
-    # OO corre con ZO_BASE_URI=/o2 → sirve assets bajo /o2/* internamente.
-    # Por eso `handle` y NO `handle_path`: no strippeamos el prefijo.
+    # ── OPENOBSERVE bajo /o2/* ──────────────────────────────────────────
     handle /o2/* {
         reverse_proxy openobserve:5080
     }
-    # /o2 sin slash → redirect al / (estilo nginx).
     handle /o2 {
         redir /o2/ permanent
     }
 
-    # ── PGWEB bajo /pgweb/* ─────────────────────────────────────────
-    # Web UI para inspeccionar PostgreSQL. pgweb escucha en :8081.
-    # Protegido con basic auth — credenciales en PGWEB_* del .env.
+    # ── PGWEB bajo /pgweb/* ─────────────────────────────────────────────
     handle_path /pgweb/* {
         basic_auth {
             {$PGWEB_USER:admin} {$PGWEB_HASH}
@@ -60,47 +42,11 @@
         redir /pgweb/ permanent
     }
 
-    # ── APP Go: rutas conocidas ───────────────────────────────────────
-    @app {
-        # Shell SPA (React)
-        path /                 # landing
-        path /assets/*         # bundle Vite (JS/CSS/svg con hash)
-        path /vite.svg
-        path /favicon.svg
-        path /icons.svg
-        # Auth flow (handlers Go)
-        path /auth/*           # /auth/login, /auth/callback, /auth/logout, /auth/refresh, /auth/device*
-        path /api/auth/*       # /api/auth/device/code, /api/auth/device/token
-        # API de la app
-        path /api/me
-        path /api/session
-        path /api/signup       # crea tenant + asigna user (Fase 1)
-        path /api/embedded-apps*
-        path /api/embedded-token
-        path /api/credentials
-        path /api/tenants*
-        path /api/projects*
-        # Endpoints públicos para validación third-party (sin cookie):
-        path /whoami           # introspect de un einar JWT
-        path /.well-known/einar/*  # JWKS y discovery del signer einar
-        # SPA pages servidas por el handler de Go (devuelve index.html)
-        path /signup
-        path /signup/*
-        path /t/*              # /t/{tenant-slug}/...
-        # Otros
-        path /hello            # smoke test
-        path /sdk/*            # SDK servido para embedded apps (Fase 4)
-    }
-    handle @app {
-        reverse_proxy app:8080
-    }
-
-    # ── Default: CASDOOR ──────────────────────────────────────────────
-    # Cubre: UI (/, /home, /apps, /users, /providers, ...), OAuth endpoints
-    # (/login/oauth/*, /callback, /api/login/oauth/*), discovery
-    # (/.well-known/*), admin API (/api/get-*, /api/add-*, ...), recursos
-    # estáticos (/static/*, /resource/*, /storage/*), etc.
+    # ── APP Go: default handler ────────────────────────────────────────
+    # All remaining traffic goes to the Go app.
+    # Auth is handled by exe.dev proxy headers (X-ExeDev-UserID,
+    # X-ExeDev-Email) injected before reaching Caddy.
     handle {
-        reverse_proxy casdoor:8000
+        reverse_proxy app:8080
     }
 }
