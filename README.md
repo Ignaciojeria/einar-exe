@@ -15,6 +15,10 @@ App en Go con Postgres (+ PostGIS) y Casdoor para auth.
 
 El script es idempotente: detecta qué falta (`.env`, usuarios, databases, migraciones) y solo ejecuta lo necesario. Puedes correrlo cuantas veces quieras.
 
+Guías dedicadas de setup:
+- [`README_SETUP.md`](README_SETUP.md) → guía rápida para humanos
+- [`spec/SETUP_SPEC.md`](spec/SETUP_SPEC.md) → spec determinista para agentes
+
 ## Servicios
 
 ### Desarrollo local
